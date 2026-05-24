@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0] - 2026-05-24
+
+### Features
+- connect to gateway-mode RDP routes via server connect_address
+
+---
+
 ## [1.4.3] - 2026-04-29
 
 ### Fixes
