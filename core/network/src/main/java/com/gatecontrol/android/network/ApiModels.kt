@@ -151,7 +151,9 @@ data class RdpRoute(
     @SerializedName("admin_session") val adminSession: Boolean?,
     @SerializedName("wol_enabled") val wolEnabled: Boolean?,
     @SerializedName("maintenance_enabled") val maintenanceEnabled: Boolean?,
-    val status: RdpRouteStatus?
+    val status: RdpRouteStatus?,
+    @SerializedName("connect_address") val connectAddress: String? = null,
+    @SerializedName("connect_port") val connectPort: Int? = null
 )
 
 data class RdpRouteStatus(
