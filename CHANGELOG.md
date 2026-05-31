@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0] - 2026-05-31
+
+### Features
+- integrate shared validator into TunnelConfig + import flows (#14)
+
+---
+
 ## [1.5.0] - 2026-05-24
 
 ### Features
