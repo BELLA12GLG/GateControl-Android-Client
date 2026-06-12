@@ -17,6 +17,7 @@ import com.gatecontrol.android.ui.components.GcStatCard
 fun StatsGrid(
     stats: TunnelStats,
     serverHost: String?,
+    activePort: Int?,
     connectedSince: Long,
     currentTimeMillis: Long = System.currentTimeMillis(),
     locale: String,
@@ -57,6 +58,11 @@ fun StatsGrid(
             GcStatCard(
                 label = stringResource(R.string.vpn_handshake),
                 value = uptimeText,
+                modifier = Modifier.weight(1f),
+            )
+            GcStatCard(
+                label = stringResource(R.string.vpn_port),
+                value = activePort?.toString() ?: "—",
                 modifier = Modifier.weight(1f),
             )
         }
