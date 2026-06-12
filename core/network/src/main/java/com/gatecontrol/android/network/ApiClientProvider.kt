@@ -41,9 +41,6 @@ class ApiClientProvider @Inject constructor(
      */
     private val dnsCache = ConcurrentHashMap<String, List<InetAddress>>()
 
-    // 定义固定的 Google 保活隔离专属安全地址
-    private val GOOGLE_KEEPALIVE_URL = "https://www.google.com/"
-
     /**
      * Pre-resolves the domain in [baseUrlStr] and populates [dnsCache].
      * Excludes VPN-internal private IPs (10.8.x.x) to ensure connectivity.
@@ -187,5 +184,11 @@ class ApiClientProvider @Inject constructor(
                 else -> { reader.skipValue(); false }
             }
         }
+    }
+
+    // 💡 必须在 companion object 中声明为编译期常量 (const val)
+    // 这样才能让 Retrofit 的 Lint 静态注解处理器以及 Hilt 生成代码在编译期顺利读取 URL
+    companion object {
+        private const val GOOGLE_KEEPALIVE_URL = "https://www.google.com/"
     }
 }
