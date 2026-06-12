@@ -30,28 +30,28 @@ class BootReceiver : BroadcastReceiver() {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                val serverUrl = setupRepository.getServerUrl()
+
+                // 无服务器配置时：不读取 DataStore，直接启动服务
+                if (serverUrl.isNullOrEmpty()) {
+                    Timber.d("BootReceiver: no server configured, starting service directly")
+                    val serviceIntent = Intent(context, VpnForegroundService::class.java)
+                    context.startForegroundService(serviceIntent)
+                    pendingResult.finish()
+                    return@launch
+                }
+
+                // 有服务器配置时：读取 DataStore（现在有 corruptionHandler 保护，不会崩溃）
                 val autoConnect = settingsRepository.getAutoConnect().first()
                 val isConfigured = setupRepository.isConfigured()
 
                 if (autoConnect && isConfigured) {
-                    val serverUrl = setupRepository.getServerUrl()
-
-                    if (serverUrl.isNullOrEmpty()) {
-                        // serverUrl 为空：跳过 Token 验证，直接启动服务（不传递 EXTRA_SERVER）
-                        Timber.d("BootReceiver: serverUrl is empty, skipping token validation and starting service")
-                        val serviceIntent = Intent(context, VpnForegroundService::class.java)
-                        context.startForegroundService(serviceIntent)
-                        pendingResult.finish()
-                        return@launch
-                    }
-
-                    // serverUrl 非空：正常进行 Token 验证
                     try {
                         val client = apiClientProvider.getClient(serverUrl)
                         client.ping()
                     } catch (e: retrofit2.HttpException) {
                         if (e.code() == 401 || e.code() == 403) {
-                            Timber.w("BootReceiver: token invalid (${e.code()}), skipping auto-connect")
+                            Timber.w("BootReceiver: token invalid (${e.code()}), skipping")
                             pendingResult.finish()
                             return@launch
                         }
@@ -59,7 +59,7 @@ class BootReceiver : BroadcastReceiver() {
                         // Network error — allow offline auto-connect
                     }
 
-                    Timber.d("BootReceiver: auto-connect enabled, starting VpnForegroundService")
+                    Timber.d("BootReceiver: starting VpnForegroundService with server")
                     val serviceIntent = Intent(context, VpnForegroundService::class.java).apply {
                         putExtra(VpnForegroundService.EXTRA_SERVER, serverUrl)
                     }
