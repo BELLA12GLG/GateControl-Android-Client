@@ -30,56 +30,65 @@ class ApiClientProvider @Inject constructor(
 ) {
     private val cache = mutableMapOf<String, ApiClient>()
     private val lock = Any()
-    
-    // 保留原版强大的高性能高可靠内存 DNS 缓存
+
+    /**
+     * DNS cache for VPN-safe resolution. When the VPN is active, Android's
+     * system DNS points to the VPN-internal resolver (10.8.0.1) but the
+     * GateControl app is excluded from the VPN (VpnService requirement).
+     * System DNS lookups fail with EAI_NODATA because 10.8.0.1 is unreachable
+     * outside the tunnel. We cache DNS results resolved BEFORE the VPN starts
+     * and fallback to them if system DNS lookup fails.
+     */
     private val dnsCache = ConcurrentHashMap<String, List<InetAddress>>()
 
-    // 定义固定的 Google 保活隔离地址常量
+    // 定义固定的 Google 保活隔离专属安全地址
     private val GOOGLE_KEEPALIVE_URL = "https://www.google.com/"
 
     /**
-     * 预解析域名 IP。
-     * 当采用 Google.com 兜底时，此方法直接切断执行，不解析、不污染 dnsCache。
+     * Pre-resolves the domain in [baseUrlStr] and populates [dnsCache].
+     * Excludes VPN-internal private IPs (10.8.x.x) to ensure connectivity.
+     * * 【切断控制】: 采用 Google 兜底策略时，该方法必须瞬间拦截，不解析、不污染 dnsCache。
      */
     fun preResolveDns(baseUrlStr: String) {
-        // 【切断控制】如果是无效路径、斜杠或已被归拢为 Google 兜底的地址，直接切断，拒绝处理
+        // 安全隔离防线：如果是空路径、默认斜杠或已转换的 Google 保活地址，立刻切断，绝不执行后续 DNS 解析
         if (baseUrlStr.isBlank() || baseUrlStr == "/" || baseUrlStr == GOOGLE_KEEPALIVE_URL) return
-        
+
         try {
             val url = URL(baseUrlStr)
             val host = url.host
             if (host.isNullOrBlank()) return
 
             val addresses = Dns.SYSTEM.lookup(host)
-            // 原版核心逻辑：过滤掉 VPN 内部的私有网段（例如 10.8.x.x），只保留真正的公网出口 IP
+            // 原版核心技术：过滤隧道内部私有网段，确保 excluded 应用通信不陷入 Android 网卡死锁
             val filtered = addresses.filter { !it.hostAddress.startsWith("10.8.") }
             if (filtered.isNotEmpty()) {
                 dnsCache[host] = filtered
             }
         } catch (_: Exception) {
-            // 预解析失败不破坏主流程
+            // Pre-resolution failure should not break the app flow
         }
     }
 
     /**
-     * 彻底清除 DNS 缓存
+     * Clears all cached DNS records.
      */
     fun clearDnsCache() {
         dnsCache.clear()
     }
 
     /**
-     * 获取或创建 API 客户端
+     * Gets or creates an [ApiClient] for the given [baseUrl].
      */
     fun getClient(baseUrl: String): ApiClient {
         synchronized(lock) {
-            // 在路由映射入口处，如果发现是没有配置服务器（空或"/"），将其安全分流到固定的 Google 地址键值上
+            // 路由入口隔离：检测到用户尚未配置服务器（为空或为默认 "/"）时，将其分流到特定的 Google 安全键上
+            // 从而保护原始 cache 池，当后续正常的服务器 URL 传入时，依然能够无缝走正常的后续执行分支
             val targetKey = if (baseUrl.isBlank() || baseUrl == "/") {
                 GOOGLE_KEEPALIVE_URL
             } else {
                 baseUrl
             }
-            
+
             return cache.getOrPut(targetKey) {
                 buildClient(targetKey)
             }
@@ -87,10 +96,10 @@ class ApiClientProvider @Inject constructor(
     }
 
     /**
-     * 构建真正的 Retrofit / OkHttp 客户端
+     * Builds a [Retrofit] client for the specified [baseUrl].
      */
     private fun buildClient(baseUrl: String): ApiClient {
-        // 二次防御性验证，确保传入 Retrofit 的协议头绝对合法
+        // 二次防御：判定当前是否处于 Google 兜底状态，并确保喂给 Retrofit 的 Url 绝对合法
         val isGoogleFallback = baseUrl == GOOGLE_KEEPALIVE_URL
         val safeBaseUrl = if (isGoogleFallback || (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://"))) {
             GOOGLE_KEEPALIVE_URL
@@ -102,26 +111,26 @@ class ApiClientProvider @Inject constructor(
             level = if (isDebuggable()) HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
         }
 
-        // 组装 OkHttpClient
+        // 开始组装专属的 OkHttpClient 架构
         val okHttpClientBuilder = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .addInterceptor(loggingInterceptor)
 
-        // 【关键安全切断】
-        // 如果当前是 Google 兜底的保活客户端，绝不挂载包含身份令牌、握手鉴权、主机名审计等敏感信息的 authInterceptor
-        // 从而在应用网络请求的最底层筑起一道防火墙，彻底切断核心业务数据外泄至 Google 的通道。
+        // 【关键业务切断防线】
+        // 如果当前是 Google 兜底保活客户端，绝对不挂载包含核心业务身份、鉴权 Token、主机名审计等敏感数据的 authInterceptor。
+        // 这在网络请求的最底层构筑了一道绝缘层，彻底切断核心敏感数据流向公网公共域名的任何可能。
         if (!isGoogleFallback) {
             okHttpClientBuilder.addInterceptor(authInterceptor)
         }
 
-        // 挂载原版的自研高抗封锁 Dns 系统
+        // 挂载原版完备的高可靠内存自定义加密对抗 DNS 逻辑
         okHttpClientBuilder.dns(object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {
                 return try {
                     Dns.SYSTEM.lookup(hostname)
                 } catch (e: Exception) {
-                    // 当 VPN 拉起导致 Android 路由发生死锁时，这里是保障 excluded 应用正常通信的最后一面网络盾牌
+                    // 当 VPN 运行时整机 DNS 瘫痪时，这是外壳 excluded 进程唯一的网络自救盾牌
                     dnsCache[hostname] ?: throw e
                 }
             }
@@ -142,7 +151,7 @@ class ApiClientProvider @Inject constructor(
     }
 
     /**
-     * 动态读取当前应用的 Debuggable 状态，以便在 Release 环境下自动关闭日志，保证企业级安全。
+     * Checks if the application is debuggable.
      */
     private fun isDebuggable(): Boolean {
         return try {
