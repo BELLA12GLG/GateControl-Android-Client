@@ -237,6 +237,7 @@ class SetupViewModelTest {
     fun `isSetupComplete is true when repository isConfigured`() {
         every { setupRepository.isConfigured() } returns true
         every { setupRepository.hasWireGuardConfig() } returns false
+        every { setupRepository.isAnyModeConfigured() } returns true
 
         val vm = SetupViewModel(setupRepository, apiClientProvider, context)
 
@@ -247,6 +248,7 @@ class SetupViewModelTest {
     fun `isSetupComplete is true when repository hasWireGuardConfig`() {
         every { setupRepository.isConfigured() } returns false
         every { setupRepository.hasWireGuardConfig() } returns true
+        every { setupRepository.isAnyModeConfigured() } returns true
 
         val vm = SetupViewModel(setupRepository, apiClientProvider, context)
 
@@ -257,6 +259,7 @@ class SetupViewModelTest {
     fun `isSetupComplete is false when repository has neither`() {
         every { setupRepository.isConfigured() } returns false
         every { setupRepository.hasWireGuardConfig() } returns false
+        every { setupRepository.isAnyModeConfigured() } returns false
 
         val vm = SetupViewModel(setupRepository, apiClientProvider, context)
 
