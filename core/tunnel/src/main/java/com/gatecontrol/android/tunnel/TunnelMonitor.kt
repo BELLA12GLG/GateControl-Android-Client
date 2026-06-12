@@ -8,12 +8,46 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
+/**
+ * Monitors the WireGuard tunnel health using a two-tier detection strategy:
+ *
+ *  Tier 1 — Local rx-only traffic check (every [trafficCheckIntervalMs], default 5 s)
+ *      Reads **rxBytes only** from the in-memory [TunnelStats] snapshot.
+ *      txBytes is intentionally ignored: when the server port is blocked the
+ *      client keeps sending keepalive/handshake packets (tx rises) but never
+ *      receives a reply (rx stalls).  A rising rx counter is therefore the
+ *      only reliable local signal that the tunnel is actually passing traffic.
+ *      Zero network I/O — safe to run frequently.
+ *
+ *  Tier 2 — Handshake staleness check (after [stallCyclesBeforeHandshakeCheck]
+ *      consecutive no-rx cycles, ~30 s by default)
+ *      Queries the WireGuard backend for the latest handshake timestamp.
+ *      Only triggered when rx has been idle, keeping backend calls rare.
+ *
+ * When the handshake is stale the monitor emits [reconnectEvent] with a
+ * [ReconnectRequest] that carries the next [suggestedPort] from [PortRotator].
+ * The ViewModel replaces the Endpoint port in-memory and reconnects — the
+ * original stored config string is never mutated.
+ *
+ * Screen-off / Doze behaviour
+ * ----------------------------
+ * Both tiers run inside [VpnForegroundService.serviceScope], which survives
+ * screen-off as a foreground service.
+ */
 class TunnelMonitor(
-    private val intervalMs: Long = 30_000L,
+    /** Interval between local rx-traffic polls (Tier 1). */
+    private val trafficCheckIntervalMs: Long = 5_000L,
+    /**
+     * How many consecutive no-rx cycles before escalating to a handshake check.
+     * Default 6 × 5 s = 30 s of rx silence triggers Tier 2.
+     */
+    private val stallCyclesBeforeHandshakeCheck: Int = 6,
     private val maxHandshakeAgeSec: Long = 180L,
     private val maxReconnectAttempts: Int = 10,
-    private val failuresBeforeDisconnect: Int = 3
+    private val failuresBeforeDisconnect: Int = 3,
 ) {
+    // ── Public event streams ──────────────────────────────────────────────────
+
     private val _disconnectEvent = MutableSharedFlow<Unit>()
     val disconnectEvent: SharedFlow<Unit> = _disconnectEvent.asSharedFlow()
 
@@ -25,39 +59,114 @@ class TunnelMonitor(
 
     private var monitorJob: Job? = null
 
-    data class ReconnectRequest(val attempt: Int, val maxAttempts: Int)
+    /**
+     * @param attempt       1-based attempt number
+     * @param maxAttempts   ceiling before giving up
+     * @param suggestedPort port the PortRotator recommends; null = keep original
+     */
+    data class ReconnectRequest(
+        val attempt: Int,
+        val maxAttempts: Int,
+        val suggestedPort: Int? = null,
+    )
 
-    fun start(scope: CoroutineScope, statsProvider: suspend () -> TunnelStats?) {
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    /**
+     * @param scope          Coroutine scope that owns the monitor loop.
+     * @param statsProvider  Suspending call that queries the WireGuard backend
+     *                       (Tier 2 — used only when rx has been idle).
+     * @param localStats     Non-suspending snapshot of the most-recent
+     *                       [TunnelStats] held in memory (Tier 1 — rx check only).
+     *                       Pass null to skip the fast-path check.
+     * @param portRotator    Optional rotator; when provided each
+     *                       [ReconnectRequest] carries the next candidate port.
+     */
+    fun start(
+        scope: CoroutineScope,
+        statsProvider: suspend () -> TunnelStats?,
+        localStats: (() -> TunnelStats)? = null,
+        portRotator: PortRotator? = null,
+    ) {
         stop()
         monitorJob = scope.launch {
-            var consecutiveFailures = 0
+            var lastRxBytes = -1L   // -1 = not yet initialised
+            var noRxCycles = 0
+            var consecutiveHandshakeFailures = 0
+
             while (true) {
-                delay(intervalMs)
+                delay(trafficCheckIntervalMs)
+
+                // ── Tier 1: rx-only local check ───────────────────────────────
+                // txBytes deliberately excluded: a blocked server port causes tx
+                // to keep rising (client retries) while rx stalls completely.
+                // Only a rising rxBytes proves the tunnel is actually working.
+                if (localStats != null) {
+                    val snap = localStats()
+                    val rxMoving = lastRxBytes >= 0 && snap.rxBytes > lastRxBytes
+                    lastRxBytes = snap.rxBytes
+
+                    if (rxMoving) {
+                        // Receiving data — tunnel is healthy.
+                        noRxCycles = 0
+                        consecutiveHandshakeFailures = 0
+                        _statsEvent.emit(snap)
+                        continue
+                    }
+
+                    // rx has not grown this cycle
+                    noRxCycles++
+                    if (noRxCycles < stallCyclesBeforeHandshakeCheck) {
+                        // Still within the grace period — don't escalate yet.
+                        continue
+                    }
+                    // Grace period expired — fall through to Tier 2.
+                    noRxCycles = 0
+                }
+
+                // ── Tier 2: handshake staleness check ────────────────────────
                 val stats = statsProvider()
-                val isFailure = stats == null || isHandshakeStale(stats.lastHandshakeEpoch, maxHandshakeAgeSec)
+                val isFailure = stats == null ||
+                    isHandshakeStale(stats.lastHandshakeEpoch, maxHandshakeAgeSec)
+
                 if (isFailure) {
-                    consecutiveFailures++
-                    if (consecutiveFailures >= failuresBeforeDisconnect) {
+                    consecutiveHandshakeFailures++
+                    if (consecutiveHandshakeFailures >= failuresBeforeDisconnect) {
                         _disconnectEvent.emit(Unit)
-                        // Attempt reconnection with exponential backoff
+
                         for (attempt in 0 until maxReconnectAttempts) {
-                            val backoffMs = calculateBackoffMs(attempt)
-                            _reconnectEvent.emit(ReconnectRequest(attempt + 1, maxReconnectAttempts))
-                            delay(backoffMs)
+                            val suggestedPort = portRotator?.nextPort()
+                            _reconnectEvent.emit(
+                                ReconnectRequest(
+                                    attempt = attempt + 1,
+                                    maxAttempts = maxReconnectAttempts,
+                                    suggestedPort = suggestedPort,
+                                )
+                            )
+
+                            delay(calculateBackoffMs(attempt))
+
                             val retryStats = statsProvider()
-                            if (retryStats != null && !isHandshakeStale(retryStats.lastHandshakeEpoch, maxHandshakeAgeSec)) {
-                                consecutiveFailures = 0
+                            val recovered = retryStats != null &&
+                                !isHandshakeStale(retryStats.lastHandshakeEpoch, maxHandshakeAgeSec)
+
+                            if (recovered) {
+                                consecutiveHandshakeFailures = 0
+                                lastRxBytes = retryStats!!.rxBytes
+                                portRotator?.reset()
                                 _statsEvent.emit(retryStats)
                                 break
                             }
+
                             if (attempt == maxReconnectAttempts - 1) {
-                                return@launch // Give up after max attempts
+                                return@launch  // give up
                             }
                         }
                     }
                 } else {
-                    consecutiveFailures = 0
-                    _statsEvent.emit(stats!!)
+                    consecutiveHandshakeFailures = 0
+                    lastRxBytes = stats!!.rxBytes
+                    _statsEvent.emit(stats)
                 }
             }
         }
@@ -70,9 +179,8 @@ class TunnelMonitor(
 
     companion object {
         fun calculateBackoffMs(attempt: Int): Long {
-            val base = 2000L
-            val factor = 1.5
-            val computed = base * Math.pow(factor, attempt.toDouble())
+            val base = 2_000L
+            val computed = base * Math.pow(1.5, attempt.toDouble())
             return minOf(computed.toLong(), 60_000L)
         }
 
