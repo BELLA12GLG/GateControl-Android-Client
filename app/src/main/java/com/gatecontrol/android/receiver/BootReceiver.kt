@@ -34,8 +34,18 @@ class BootReceiver : BroadcastReceiver() {
                 val isConfigured = setupRepository.isConfigured()
 
                 if (autoConnect && isConfigured) {
-                    // Validate token before auto-connecting — skip if expired/deleted
                     val serverUrl = setupRepository.getServerUrl()
+
+                    if (serverUrl.isNullOrEmpty()) {
+                        // serverUrl 为空：跳过 Token 验证，直接启动服务（不传递 EXTRA_SERVER）
+                        Timber.d("BootReceiver: serverUrl is empty, skipping token validation and starting service")
+                        val serviceIntent = Intent(context, VpnForegroundService::class.java)
+                        context.startForegroundService(serviceIntent)
+                        pendingResult.finish()
+                        return@launch
+                    }
+
+                    // serverUrl 非空：正常进行 Token 验证
                     try {
                         val client = apiClientProvider.getClient(serverUrl)
                         client.ping()
