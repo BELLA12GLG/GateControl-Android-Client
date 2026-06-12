@@ -10,7 +10,9 @@ import com.gatecontrol.android.network.PermissionFlags
 import com.gatecontrol.android.network.TrafficStats
 import com.gatecontrol.android.network.VpnService
 import com.gatecontrol.android.service.TunnelStateHolder
+import com.gatecontrol.android.tunnel.PortRotator
 import com.gatecontrol.android.tunnel.SplitTunnelConfig
+import com.gatecontrol.android.tunnel.TunnelConfig
 import com.gatecontrol.android.tunnel.TunnelManager
 import com.gatecontrol.android.tunnel.TunnelMonitor
 import com.gatecontrol.android.tunnel.TunnelState
@@ -47,12 +49,9 @@ class VpnViewModel @Inject constructor(
     private val _trafficUsage = MutableStateFlow<TrafficStats?>(null)
     val trafficUsage: StateFlow<TrafficStats?> = _trafficUsage.asStateFlow()
 
-    private val _permissions = MutableStateFlow(PermissionFlags(
-        services = false,
-        traffic = false,
-        dns = false,
-        rdp = false,
-    ))
+    private val _permissions = MutableStateFlow(
+        PermissionFlags(services = false, traffic = false, dns = false, rdp = false)
+    )
     val permissions: StateFlow<PermissionFlags> = _permissions.asStateFlow()
 
     private val _services = MutableStateFlow<List<VpnService>>(emptyList())
@@ -63,21 +62,36 @@ class VpnViewModel @Inject constructor(
 
     private var monitoringStarted = false
 
-    /** Emits true when the stored token is invalid and the user should be
-     *  redirected to the Setup screen. Observed by the UI layer. */
     private val _tokenInvalid = MutableStateFlow(false)
     val tokenInvalid: StateFlow<Boolean> = _tokenInvalid.asStateFlow()
 
-    /** Emits true when the peer was disabled on the server and the tunnel was disconnected. */
     private val _peerDisabled = MutableStateFlow(false)
     val peerDisabled: StateFlow<Boolean> = _peerDisabled.asStateFlow()
 
+    // ── Port rotation state ───────────────────────────────────────────────────
+
     /**
-     * Validate the stored API token against the server via /client/ping.
-     * If the server returns 401 → token is expired/deleted → clear local
-     * config and signal the UI to redirect to the Setup screen.
-     * Network errors are ignored (offline mode — allow cached config).
+     * Port currently in use for the active tunnel connection.
+     * null  → use whatever port is in the stored WireGuard config.
+     * non-null → port was swapped during a reconnect attempt.
      */
+    private var activePort: Int? = null
+
+    /**
+     * PortRotator lazily initialised from the original endpoint port in the
+     * stored config. Re-created whenever [connect] is called so rotations
+     * always start from a fresh cycle after a deliberate reconnect.
+     */
+    private var portRotator: PortRotator? = null
+
+    /**
+     * Most-recently resolved split-tunnel config, kept so reconnects can
+     * reuse it without fetching from the server again.
+     */
+    private var lastSplitTunnelConfig: SplitTunnelConfig = SplitTunnelConfig()
+
+    // ── Token / peer validation ───────────────────────────────────────────────
+
     fun validateToken() {
         val serverUrl = setupRepository.getServerUrl()
         val token = setupRepository.getApiToken()
@@ -85,29 +99,26 @@ class VpnViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val client = apiClientProvider.getClient(serverUrl)
-                client.ping()
-                // Token is valid — nothing to do
+                apiClientProvider.getClient(serverUrl).ping()
             } catch (e: retrofit2.HttpException) {
                 if (e.code() == 401 || e.code() == 403) {
-                    Timber.w("Token invalid (HTTP ${e.code()}) — clearing config, redirecting to setup")
+                    Timber.w("Token invalid (HTTP ${e.code()}) — clearing config")
                     setupRepository.clear()
                     apiClientProvider.invalidate()
                     _tokenInvalid.value = true
                 }
             } catch (e: Exception) {
-                // Network error (timeout, DNS, etc.) — allow offline mode
                 Timber.d("Token validation skipped (offline): ${e.message}")
             }
         }
     }
 
-    /** Start background monitoring loops. Called from the UI layer via LaunchedEffect. */
+    // ── Monitoring ────────────────────────────────────────────────────────────
+
     fun startMonitoring() {
         if (monitoringStarted) return
         monitoringStarted = true
 
-        // Pre-resolve DNS for the server in case VPN is already active
         viewModelScope.launch {
             val serverUrl = setupRepository.getServerUrl()
             if (serverUrl.isNotEmpty()) {
@@ -118,12 +129,15 @@ class VpnViewModel @Inject constructor(
             }
         }
 
+        // Sync tunnel-connected state to TunnelStateHolder for the tile / service
         viewModelScope.launch {
             tunnelManager.state.collect { state ->
                 TunnelStateHolder.isConnected = state is TunnelState.Connected
                 TunnelStateHolder.serverHost = serverHost
             }
         }
+
+        // Fast stats refresh for the UI (1 s)
         viewModelScope.launch {
             while (isActive) {
                 delay(1_000)
@@ -132,53 +146,103 @@ class VpnViewModel @Inject constructor(
                 }
             }
         }
-        // Periodic peer status check — detect server-side peer disabling
+
+        // Peer enabled check (every 60 s, server-side)
         viewModelScope.launch {
             while (isActive) {
-                delay(60_000) // Check every 60 seconds
-                if (tunnelState.value is TunnelState.Connected) {
-                    checkPeerEnabled()
-                }
+                delay(60_000)
+                if (tunnelState.value is TunnelState.Connected) checkPeerEnabled()
             }
+        }
+
+        // ── Reconnect event handler ───────────────────────────────────────────
+        // TunnelMonitor (running inside VpnForegroundService) emits reconnect
+        // events. We observe them here to handle the port-swap + connect call.
+        // Note: TunnelMonitor is owned by VpnForegroundService; the shared flow
+        // is accessed via TunnelStateHolder so the ViewModel never holds a
+        // direct reference to the service.
+        viewModelScope.launch {
+            TunnelStateHolder.reconnectEvents.collect { req ->
+                Timber.i(
+                    "VpnViewModel: reconnect requested attempt=${req.attempt}/${req.maxAttempts}" +
+                        " suggestedPort=${req.suggestedPort}"
+                )
+                reconnectWithPort(req.suggestedPort)
+            }
+        }
+    }
+
+    // ── Reconnect with port swap ──────────────────────────────────────────────
+
+    /**
+     * Reconnects the tunnel using [port] as the Endpoint port.
+     *
+     * The stored WireGuard config string is **never mutated** — the port
+     * replacement is done in memory for this connection attempt only.
+     * On success the port is persisted to [SettingsRepository] so the next
+     * app launch can skip the rotation. On explicit user disconnect or
+     * setup-clear the stored port is cleared automatically via [resetPortState].
+     */
+    private suspend fun reconnectWithPort(port: Int?) {
+        val rawConfig = setupRepository.getWireGuardConfig()
+        if (rawConfig.isEmpty()) return
+
+        val configToUse = if (port != null) {
+            activePort = port
+            replaceEndpointPort(rawConfig, port)
+        } else {
+            activePort = null
+            rawConfig
+        }
+
+        try {
+            tunnelManager.connect(configToUse, lastSplitTunnelConfig)
+            Timber.d("VpnViewModel: reconnected on port ${port ?: "original"}")
+
+            // Persist the successful port so the next launch uses it directly
+            if (port != null) {
+                settingsRepository.saveSuccessfulPort(port)
+                Timber.i("VpnViewModel: persisted successful port $port")
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "VpnViewModel: reconnect failed on port $port")
         }
     }
 
     /**
-     * Check if the peer is still enabled on the server.
-     * If disabled, disconnect the tunnel immediately.
+     * Replaces the `Endpoint = host:port` line in the raw WireGuard config
+     * string without touching the stored copy.  Handles both plain IPv4/hostname
+     * and bracketed IPv6 endpoints (`[::1]:port`).
      */
-    private suspend fun checkPeerEnabled() {
-        try {
-            val serverUrl = setupRepository.getServerUrl()
-            if (serverUrl.isEmpty()) return
-            val peerId = setupRepository.getPeerId()
-            if (peerId <= 0) return
-            val client = apiClientProvider.getClient(serverUrl)
-            val response = client.getPeerInfo(peerId)
-            if (response.ok && !response.peer.enabled) {
-                Timber.w("Peer disabled on server (id=$peerId) — disconnecting tunnel")
-                tunnelManager.disconnect()
-                _stats.value = TunnelStats()
-                apiClientProvider.clearDnsCache()
-                _peerDisabled.value = true
+    internal fun replaceEndpointPort(config: String, port: Int): String =
+        config.lines().joinToString("\n") { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("Endpoint", ignoreCase = true) && trimmed.contains("=")) {
+                val eqIndex = line.indexOf('=')
+                val prefix = line.substring(0, eqIndex + 1)   // keep indent + "="
+                val value = line.substring(eqIndex + 1).trim()
+                val hostPart = when {
+                    // IPv6 bracketed: [::1]:51820 → strip last :port
+                    value.startsWith("[") -> value.substringBeforeLast(":")
+                    // IPv4 / hostname: 1.2.3.4:51820 → strip last :port
+                    else -> value.substringBeforeLast(":")
+                }
+                "$prefix $hostPart:$port"
+            } else {
+                line
             }
-        } catch (e: Exception) {
-            Timber.d("Peer status check failed (offline): ${e.message}")
         }
-    }
 
-    // --- Actions ---
+    // ── Connect / Disconnect ──────────────────────────────────────────────────
 
     fun connect() {
         viewModelScope.launch {
-            val config = setupRepository.getWireGuardConfig()
-            if (config.isEmpty()) {
+            val rawConfig = setupRepository.getWireGuardConfig()
+            if (rawConfig.isEmpty()) {
                 Timber.w("VpnViewModel: no WireGuard config available")
                 return@launch
             }
-            // Pre-resolve server hostname BEFORE VPN starts, so API calls
-            // work after the VPN is up (when system DNS points to 10.8.0.1
-            // which is unreachable from the excluded GateControl app).
+
             val serverUrl = setupRepository.getServerUrl()
             if (serverUrl.isNotEmpty()) {
                 try {
@@ -186,86 +250,37 @@ class VpnViewModel @Inject constructor(
                     if (host != null) apiClientProvider.preResolveDns(host)
                 } catch (_: Exception) {}
             }
-            // Fetch admin split-tunnel preset (graceful — never blocks connect)
-            var splitTunnelConfig = SplitTunnelConfig() // default: mode=off
-            try {
-                var adminPresetActive = false
-                if (serverUrl.isNotEmpty()) {
-                    try {
-                        val client = apiClientProvider.getClient(serverUrl)
-                        val preset = client.getSplitTunnelPreset()
-                        if (preset.ok && preset.mode != "off" && preset.source != "none") {
-                            // Admin preset exists — store and use it
-                            settingsRepository.setSplitTunnelMode(preset.mode)
-                            val arr = JSONArray()
-                            preset.networks.forEach { arr.put(JSONObject().put("cidr", it.cidr).put("label", it.label)) }
-                            settingsRepository.setSplitTunnelNetworks(arr.toString())
-                            settingsRepository.setSplitTunnelAdminLocked(preset.locked)
-                            adminPresetActive = true
 
-                            // Merge: admin networks + user apps (apps ALWAYS user-controlled)
-                            val userApps = settingsRepository.getSplitTunnelAppsV2().first()
-                            val appsList = parseSplitAppsJson(userApps)
+            // Initialise the PortRotator from the original endpoint port.
+            // Also check if we have a previously successful port to try first.
+            val originalPort = try {
+                TunnelConfig.parse(rawConfig).getServerPort()
+            } catch (_: Exception) { 51820 }
 
-                            splitTunnelConfig = SplitTunnelConfig(
-                                mode = preset.mode,
-                                networks = preset.networks.map { it.cidr },
-                                apps = appsList,
-                            )
-                        }
-                    } catch (e: Exception) {
-                        Timber.w(e, "Split-tunnel preset fetch failed")
-                    }
-                }
+            portRotator = PortRotator(originalPort)
 
-                // No admin preset — use LOCAL user settings from DataStore
-                if (!adminPresetActive) {
-                    val mode = settingsRepository.getSplitTunnelMode().first()
-                    if (mode != "off") {
-                        val networksJson = settingsRepository.getSplitTunnelNetworks().first()
-                        val appsJson = settingsRepository.getSplitTunnelAppsV2().first()
-                        splitTunnelConfig = SplitTunnelConfig(
-                            mode = mode,
-                            networks = parseSplitNetworksJsonToCidrs(networksJson),
-                            apps = parseSplitAppsJson(appsJson),
-                        )
-                        Timber.d("Split-tunnel: using local config mode=$mode, ${splitTunnelConfig.networks.size} networks, ${splitTunnelConfig.apps.size} apps")
-                    }
-                }
-            } catch (e: Exception) {
-                Timber.w(e, "Split-tunnel config load failed")
+            // If a successful port was persisted, try it immediately
+            val lastSuccessfulPort = settingsRepository.getLastSuccessfulPort().first()
+            val configToConnect = if (lastSuccessfulPort != 0 && lastSuccessfulPort != originalPort) {
+                Timber.d("VpnViewModel: trying persisted port $lastSuccessfulPort")
+                activePort = lastSuccessfulPort
+                replaceEndpointPort(rawConfig, lastSuccessfulPort)
+            } else {
+                activePort = null
+                rawConfig
             }
 
+            // Resolve split-tunnel config
+            val splitConfig = resolveSplitTunnelConfig(serverUrl)
+            lastSplitTunnelConfig = splitConfig
+
             try {
-                tunnelManager.connect(config, splitTunnelConfig)
+                tunnelManager.connect(configToConnect, splitConfig)
                 Timber.d("VpnViewModel: tunnel connect requested")
                 reportDeviceHostname(serverUrl)
             } catch (e: Exception) {
                 Timber.e(e, "VpnViewModel: connect failed")
             }
-        }
-    }
-
-    /**
-     * Fire-and-forget hostname report for internal DNS resolution.
-     * Server rate-limits (3/min/token) and feature-gates (403) — we
-     * never surface failures; they're logged at debug level only.
-     * Uses Build.MODEL as the source — user-set Settings.Global.DEVICE_NAME
-     * would be preferable but requires a Context, which is not in scope
-     * here; can be plumbed through later without changing the API.
-     */
-    private suspend fun reportDeviceHostname(serverUrl: String) {
-        try {
-            val sanitized = com.gatecontrol.android.common.HostnameSanitizer.sanitize(android.os.Build.MODEL)
-            if (sanitized.isNullOrBlank()) return
-
-            val client = apiClientProvider.getClient(serverUrl)
-            val response = client.reportHostname(
-                com.gatecontrol.android.network.HostnameReportRequest(sanitized)
-            )
-            Timber.d("Hostname report: assigned=${response.assigned} changed=${response.changed}")
-        } catch (e: Exception) {
-            Timber.d(e, "Hostname report skipped: ${e.message}")
         }
     }
 
@@ -275,12 +290,49 @@ class VpnViewModel @Inject constructor(
                 tunnelManager.disconnect()
                 _stats.value = TunnelStats()
                 apiClientProvider.clearDnsCache()
+                // Restore original port on explicit user disconnect
+                resetPortState()
                 Timber.d("VpnViewModel: tunnel disconnected, DNS cache cleared")
             } catch (e: Exception) {
                 Timber.e(e, "VpnViewModel: disconnect failed")
             }
         }
     }
+
+    /**
+     * Clears the persisted successful port and resets in-memory rotation state.
+     * Called on user disconnect, setup clear, or peer disabled.
+     */
+    private suspend fun resetPortState() {
+        activePort = null
+        portRotator?.reset()
+        settingsRepository.clearSuccessfulPort()
+        Timber.d("VpnViewModel: port state reset to original")
+    }
+
+    // ── Peer check ────────────────────────────────────────────────────────────
+
+    private suspend fun checkPeerEnabled() {
+        try {
+            val serverUrl = setupRepository.getServerUrl()
+            if (serverUrl.isEmpty()) return
+            val peerId = setupRepository.getPeerId()
+            if (peerId <= 0) return
+            val response = apiClientProvider.getClient(serverUrl).getPeerInfo(peerId)
+            if (response.ok && !response.peer.enabled) {
+                Timber.w("Peer disabled on server (id=$peerId) — disconnecting tunnel")
+                tunnelManager.disconnect()
+                _stats.value = TunnelStats()
+                apiClientProvider.clearDnsCache()
+                resetPortState()
+                _peerDisabled.value = true
+            }
+        } catch (e: Exception) {
+            Timber.d("Peer status check failed (offline): ${e.message}")
+        }
+    }
+
+    // ── Other actions ─────────────────────────────────────────────────────────
 
     fun toggleKillSwitch(enabled: Boolean) {
         viewModelScope.launch {
@@ -294,13 +346,10 @@ class VpnViewModel @Inject constructor(
             try {
                 val serverUrl = setupRepository.getServerUrl()
                 if (serverUrl.isEmpty()) return@launch
-                val client = apiClientProvider.getClient(serverUrl)
                 val peerId = setupRepository.getPeerId()
                 if (peerId <= 0) return@launch
-                val response = client.getTraffic(peerId)
-                if (response.ok) {
-                    _trafficUsage.value = response.traffic
-                }
+                val response = apiClientProvider.getClient(serverUrl).getTraffic(peerId)
+                if (response.ok) _trafficUsage.value = response.traffic
             } catch (e: Exception) {
                 Timber.w(e, "VpnViewModel: failed to load traffic stats")
             }
@@ -312,44 +361,33 @@ class VpnViewModel @Inject constructor(
             try {
                 val serverUrl = setupRepository.getServerUrl()
                 if (serverUrl.isEmpty()) return@launch
-                val client = apiClientProvider.getClient(serverUrl)
-                val response = client.getServices()
-                if (response.ok) {
-                    _services.value = response.services
-                }
+                val response = apiClientProvider.getClient(serverUrl).getServices()
+                if (response.ok) _services.value = response.services
             } catch (e: Exception) {
                 Timber.w(e, "VpnViewModel: failed to load services")
             }
         }
     }
 
-    /** Derive server hostname from stored WireGuard config. */
     val serverHost: String?
         get() {
             val config = setupRepository.getWireGuardConfig()
             if (config.isEmpty()) return null
             return try {
-                com.gatecontrol.android.tunnel.TunnelConfig.parse(config).getServerHost()
-            } catch (_: Exception) {
-                null
-            }
+                TunnelConfig.parse(config).getServerHost()
+            } catch (_: Exception) { null }
         }
 
     fun runDnsLeakTest(onResult: (String) -> Unit) {
         viewModelScope.launch {
             try {
                 val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.isEmpty()) {
-                    onResult("No server configured")
-                    return@launch
-                }
-                val client = apiClientProvider.getClient(serverUrl)
-                val response = client.dnsCheck()
-                if (response.ok) {
-                    onResult("DNS: ${response.vpnDns} (Subnet: ${response.vpnSubnet})")
-                } else {
-                    onResult("DNS check failed")
-                }
+                if (serverUrl.isEmpty()) { onResult("No server configured"); return@launch }
+                val response = apiClientProvider.getClient(serverUrl).dnsCheck()
+                onResult(
+                    if (response.ok) "DNS: ${response.vpnDns} (Subnet: ${response.vpnSubnet})"
+                    else "DNS check failed"
+                )
             } catch (e: Exception) {
                 Timber.w(e, "VpnViewModel: DNS leak test failed")
                 onResult("DNS test error: ${e.localizedMessage}")
@@ -357,22 +395,14 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Invalidate cached API clients so the next request uses a fresh connection.
-     * Must be called when the network changes (VPN connect/disconnect) because
-     * OkHttp's connection pool may hold stale connections on the old interface.
-     */
-    fun invalidateApiClients() {
-        apiClientProvider.invalidate()
-    }
+    fun invalidateApiClients() = apiClientProvider.invalidate()
 
     fun loadPermissions() {
         viewModelScope.launch {
             try {
                 val serverUrl = setupRepository.getServerUrl()
                 if (serverUrl.isEmpty()) return@launch
-                val client = apiClientProvider.getClient(serverUrl)
-                val response = client.getPermissions()
+                val response = apiClientProvider.getClient(serverUrl).getPermissions()
                 if (response.ok) {
                     val flags = response.permissions
                     _permissions.value = flags
@@ -389,7 +419,69 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // --- Split-tunnel JSON helpers ---
+    // ── Split-tunnel helpers ──────────────────────────────────────────────────
+
+    private suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
+        var splitTunnelConfig = SplitTunnelConfig()
+        try {
+            var adminPresetActive = false
+            if (serverUrl.isNotEmpty()) {
+                try {
+                    val client = apiClientProvider.getClient(serverUrl)
+                    val preset = client.getSplitTunnelPreset()
+                    if (preset.ok && preset.mode != "off" && preset.source != "none") {
+                        settingsRepository.setSplitTunnelMode(preset.mode)
+                        val arr = JSONArray()
+                        preset.networks.forEach {
+                            arr.put(JSONObject().put("cidr", it.cidr).put("label", it.label))
+                        }
+                        settingsRepository.setSplitTunnelNetworks(arr.toString())
+                        settingsRepository.setSplitTunnelAdminLocked(preset.locked)
+                        adminPresetActive = true
+
+                        val userApps = settingsRepository.getSplitTunnelAppsV2().first()
+                        splitTunnelConfig = SplitTunnelConfig(
+                            mode = preset.mode,
+                            networks = preset.networks.map { it.cidr },
+                            apps = parseSplitAppsJson(userApps),
+                        )
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Split-tunnel preset fetch failed")
+                }
+            }
+            if (!adminPresetActive) {
+                val mode = settingsRepository.getSplitTunnelMode().first()
+                if (mode != "off") {
+                    val networksJson = settingsRepository.getSplitTunnelNetworks().first()
+                    val appsJson = settingsRepository.getSplitTunnelAppsV2().first()
+                    splitTunnelConfig = SplitTunnelConfig(
+                        mode = mode,
+                        networks = parseSplitNetworksJsonToCidrs(networksJson),
+                        apps = parseSplitAppsJson(appsJson),
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Split-tunnel config load failed")
+        }
+        return splitTunnelConfig
+    }
+
+    private fun reportDeviceHostname(serverUrl: String) {
+        viewModelScope.launch {
+            try {
+                val sanitized = com.gatecontrol.android.common.HostnameSanitizer
+                    .sanitize(android.os.Build.MODEL)
+                if (sanitized.isNullOrBlank()) return@launch
+                val response = apiClientProvider.getClient(serverUrl)
+                    .reportHostname(com.gatecontrol.android.network.HostnameReportRequest(sanitized))
+                Timber.d("Hostname report: assigned=${response.assigned} changed=${response.changed}")
+            } catch (e: Exception) {
+                Timber.d(e, "Hostname report skipped: ${e.message}")
+            }
+        }
+    }
 
     private fun parseSplitNetworksJsonToCidrs(json: String): List<String> {
         if (json.isBlank() || json == "[]") return emptyList()
@@ -397,7 +489,7 @@ class VpnViewModel @Inject constructor(
             val arr = JSONArray(json)
             (0 until arr.length()).map { arr.getJSONObject(it).getString("cidr") }
         } catch (e: Exception) {
-            Timber.w(e, "Failed to parse split-tunnel networks JSON, falling back to empty")
+            Timber.w(e, "Failed to parse split-tunnel networks JSON")
             emptyList()
         }
     }
@@ -408,7 +500,7 @@ class VpnViewModel @Inject constructor(
             val arr = JSONArray(json)
             (0 until arr.length()).map { arr.getJSONObject(it).getString("package") }
         } catch (e: Exception) {
-            Timber.w(e, "Failed to parse split-tunnel apps JSON, falling back to empty")
+            Timber.w(e, "Failed to parse split-tunnel apps JSON")
             emptyList()
         }
     }
