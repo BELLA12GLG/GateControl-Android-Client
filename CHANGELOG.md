@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.21] - 2026-06-12
+
+### Changes
+- 更新 SetupViewModel.kt
+
+---
+
 ## [1.6.16] - 2026-06-12
 
 ### Changes
