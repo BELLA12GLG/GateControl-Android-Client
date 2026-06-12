@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.10] - 2026-06-12
+
+### Changes
+- Update build.gradle.kts
+
+---
+
 ## [1.6.5] - 2026-06-12
 
 ### Changes
