@@ -201,14 +201,44 @@ class VpnViewModel @Inject constructor(
             }
             lastSplitTunnelConfig = splitConfig
 
+            // 首次连接：失败后自动轮换端口重试，最多尝试5个候选端口
+            var connected = false
             try {
                 tunnelManager.connect(configToConnect, splitConfig)
+                connected = true
                 Timber.d("VpnViewModel: tunnel connect requested")
                 if (!setupRepository.isWireGuardOnlyMode()) {
                     reportDeviceHostname(serverUrl)
                 }
             } catch (e: Exception) {
-                Timber.e(e, "VpnViewModel: connect failed")
+                Timber.w(e, "VpnViewModel: initial connect failed, starting port rotation")
+            }
+
+            if (!connected) {
+                val rotator = portRotator ?: return@launch
+                val maxAttempts = minOf(rotator.candidateCount, 5)
+                for (attempt in 1..maxAttempts) {
+                    val nextPort = rotator.nextPort()
+                    Timber.d("VpnViewModel: retry attempt=$attempt port=$nextPort")
+                    val retryConfig = replaceEndpointPort(rawConfig, nextPort)
+                    try {
+                        tunnelManager.connect(retryConfig, splitConfig)
+                        activePort = nextPort
+                        settingsRepository.saveSuccessfulPort(nextPort)
+                        Timber.i("VpnViewModel: connected on retry port=$nextPort")
+                        connected = true
+                        if (!setupRepository.isWireGuardOnlyMode()) {
+                            reportDeviceHostname(serverUrl)
+                        }
+                        break
+                    } catch (e: Exception) {
+                        Timber.w(e, "VpnViewModel: retry failed on port=$nextPort")
+                        delay(1_000L * attempt) // 递增等待：1s, 2s, 3s...
+                    }
+                }
+                if (!connected) {
+                    Timber.e("VpnViewModel: all initial connect attempts failed")
+                }
             }
         }
     }
