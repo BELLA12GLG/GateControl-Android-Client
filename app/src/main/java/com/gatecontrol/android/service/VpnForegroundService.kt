@@ -126,24 +126,55 @@ class VpnForegroundService : VpnService() {
         autoConnectJob?.cancel()
         autoConnectJob = serviceScope.launch(Dispatchers.IO) {
             try {
-                val rawConfig = setupRepository.getWireGuardConfig()
-                if (rawConfig.isEmpty()) {
-                    Timber.w("VpnForegroundService: no WireGuard config available, cannot auto-connect")
+                // ① 先检查 VPN 权限。
+                //    prepare() 返回 null  → 权限已授予，可以直接连。
+                //    prepare() 返回非 null → 权限未授予（或崩溃后被系统撤销），
+                //    无法在没有 Activity 的情况下弹授权对话框，发通知提示用户手动打开一次 App。
+                val prepareIntent = android.net.VpnService.prepare(this@VpnForegroundService)
+                if (prepareIntent != null) {
+                    Timber.w("VpnForegroundService: VPN permission not granted, cannot auto-connect")
+                    showVpnPermissionNotification()
+                    stopSelf()
                     return@launch
                 }
 
-                Timber.d("VpnForegroundService: auto-connecting tunnel (pure WireGuard mode)")
-                // 纯 WireGuard 模式：不拉取服务器 split-tunnel preset，使用空配置
+                val rawConfig = setupRepository.getWireGuardConfig()
+                if (rawConfig.isEmpty()) {
+                    Timber.w("VpnForegroundService: no WireGuard config available, cannot auto-connect")
+                    stopSelf()
+                    return@launch
+                }
+
+                Timber.d("VpnForegroundService: auto-connecting tunnel")
                 tunnelManager.connect(rawConfig, SplitTunnelConfig())
                 connectedSinceMs = System.currentTimeMillis()
                 Timber.i("VpnForegroundService: tunnel auto-connected successfully")
 
-                // 连接成功后再启动监控
+                // 连接成功后启动监控
                 startTunnelMonitor()
             } catch (e: Exception) {
                 Timber.e(e, "VpnForegroundService: auto-connect failed")
             }
         }
+    }
+
+    /** 当开机自启时 VPN 权限已被撤销，发一条持久通知引导用户打开 App 重新授权。 */
+    private fun showVpnPermissionNotification() {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pending = PendingIntent.getActivity(
+            this, 99, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notif = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.vpn_permission_required_title))
+            .setContentText(getString(R.string.vpn_permission_required_body))
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID + 1, notif)
     }
 
     // ── TunnelMonitor 集成 ────────────────────────────────────────────────────
