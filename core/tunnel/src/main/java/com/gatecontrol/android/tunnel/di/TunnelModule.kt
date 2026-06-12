@@ -2,7 +2,6 @@ package com.gatecontrol.android.tunnel.di
 
 import android.content.Context
 import com.gatecontrol.android.tunnel.TunnelManager
-import com.gatecontrol.android.tunnel.TunnelMonitor
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -19,7 +18,6 @@ object TunnelModule {
     fun provideTunnelManager(@ApplicationContext context: Context): TunnelManager =
         TunnelManager(context)
 
-    @Provides
-    @Singleton
-    fun provideTunnelMonitor(): TunnelMonitor = TunnelMonitor()
+    // TunnelMonitor 由 VpnForegroundService 按需创建（每次连接独立实例），
+    // 不在 DI 中提供单例，避免状态混乱。
 }
