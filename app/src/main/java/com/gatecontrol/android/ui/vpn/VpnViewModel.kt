@@ -121,7 +121,7 @@ class VpnViewModel @Inject constructor(
 
         viewModelScope.launch {
             val serverUrl = setupRepository.getServerUrl()
-            if (serverUrl.isNotEmpty()) {
+            if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
                 try {
                     val host = java.net.URI(serverUrl).host
                     if (host != null) apiClientProvider.preResolveDns(host)
@@ -244,7 +244,8 @@ class VpnViewModel @Inject constructor(
             }
 
             val serverUrl = setupRepository.getServerUrl()
-            if (serverUrl.isNotEmpty()) {
+            val hasValidServer = serverUrl.startsWith("http://") || serverUrl.startsWith("https://")
+            if (hasValidServer) {
                 try {
                     val host = java.net.URI(serverUrl).host
                     if (host != null) apiClientProvider.preResolveDns(host)
@@ -469,6 +470,13 @@ class VpnViewModel @Inject constructor(
     }
 
     private fun reportDeviceHostname(serverUrl: String) {
+        // Guard: skip if serverUrl is empty or not a valid http(s) URL.
+        // An invalid URL (e.g. "/" when no server is configured) would cause
+        // ApiClientProvider.buildClient() to throw IllegalArgumentException.
+        if (serverUrl.isEmpty() || (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://"))) {
+            Timber.d("VpnViewModel: reportDeviceHostname skipped — invalid serverUrl: '$serverUrl'")
+            return
+        }
         viewModelScope.launch {
             try {
                 val sanitized = com.gatecontrol.android.common.HostnameSanitizer
