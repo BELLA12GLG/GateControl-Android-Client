@@ -68,31 +68,22 @@ class VpnViewModel @Inject constructor(
     private val _peerDisabled = MutableStateFlow(false)
     val peerDisabled: StateFlow<Boolean> = _peerDisabled.asStateFlow()
 
+    // ── 是否为纯 WireGuard 模式（无服务器） ─────────────────────────────────
+    val isWireGuardOnlyMode: Boolean
+        get() = setupRepository.isWireGuardOnlyMode()
+
     // ── Port rotation state ───────────────────────────────────────────────────
 
-    /**
-     * Port currently in use for the active tunnel connection.
-     * null  → use whatever port is in the stored WireGuard config.
-     * non-null → port was swapped during a reconnect attempt.
-     */
     private var activePort: Int? = null
-
-    /**
-     * PortRotator lazily initialised from the original endpoint port in the
-     * stored config. Re-created whenever [connect] is called so rotations
-     * always start from a fresh cycle after a deliberate reconnect.
-     */
     private var portRotator: PortRotator? = null
-
-    /**
-     * Most-recently resolved split-tunnel config, kept so reconnects can
-     * reuse it without fetching from the server again.
-     */
     private var lastSplitTunnelConfig: SplitTunnelConfig = SplitTunnelConfig()
 
-    // ── Token / peer validation ───────────────────────────────────────────────
+    // ── Token 验证（仅服务器模式）────────────────────────────────────────────
 
     fun validateToken() {
+        // 纯 WireGuard 模式无需验证 token
+        if (setupRepository.isWireGuardOnlyMode()) return
+
         val serverUrl = setupRepository.getServerUrl()
         val token = setupRepository.getApiToken()
         if (serverUrl.isEmpty() || token.isEmpty()) return
@@ -113,23 +104,25 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // ── Monitoring ────────────────────────────────────────────────────────────
+    // ── 监控 ──────────────────────────────────────────────────────────────────
 
     fun startMonitoring() {
         if (monitoringStarted) return
         monitoringStarted = true
 
-        viewModelScope.launch {
-            val serverUrl = setupRepository.getServerUrl()
-            if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
-                try {
-                    val host = java.net.URI(serverUrl).host
-                    if (host != null) apiClientProvider.preResolveDns(host)
-                } catch (_: Exception) {}
+        // 仅服务器模式需要预解析 DNS
+        if (!setupRepository.isWireGuardOnlyMode()) {
+            viewModelScope.launch {
+                val serverUrl = setupRepository.getServerUrl()
+                if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
+                    try {
+                        val host = java.net.URI(serverUrl).host
+                        if (host != null) apiClientProvider.preResolveDns(host)
+                    } catch (_: Exception) {}
+                }
             }
         }
 
-        // Sync tunnel-connected state to TunnelStateHolder for the tile / service
         viewModelScope.launch {
             tunnelManager.state.collect { state ->
                 TunnelStateHolder.isConnected = state is TunnelState.Connected
@@ -137,7 +130,6 @@ class VpnViewModel @Inject constructor(
             }
         }
 
-        // Fast stats refresh for the UI (1 s)
         viewModelScope.launch {
             while (isActive) {
                 delay(1_000)
@@ -147,20 +139,16 @@ class VpnViewModel @Inject constructor(
             }
         }
 
-        // Peer enabled check (every 60 s, server-side)
-        viewModelScope.launch {
-            while (isActive) {
-                delay(60_000)
-                if (tunnelState.value is TunnelState.Connected) checkPeerEnabled()
+        // 对等节点检查仅在服务器模式下执行
+        if (!setupRepository.isWireGuardOnlyMode()) {
+            viewModelScope.launch {
+                while (isActive) {
+                    delay(60_000)
+                    if (tunnelState.value is TunnelState.Connected) checkPeerEnabled()
+                }
             }
         }
 
-        // ── Reconnect event handler ───────────────────────────────────────────
-        // TunnelMonitor (running inside VpnForegroundService) emits reconnect
-        // events. We observe them here to handle the port-swap + connect call.
-        // Note: TunnelMonitor is owned by VpnForegroundService; the shared flow
-        // is accessed via TunnelStateHolder so the ViewModel never holds a
-        // direct reference to the service.
         viewModelScope.launch {
             TunnelStateHolder.reconnectEvents.collect { req ->
                 Timber.i(
@@ -172,17 +160,78 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // ── Reconnect with port swap ──────────────────────────────────────────────
+    // ── 连接 / 断开 ───────────────────────────────────────────────────────────
 
-    /**
-     * Reconnects the tunnel using [port] as the Endpoint port.
-     *
-     * The stored WireGuard config string is **never mutated** — the port
-     * replacement is done in memory for this connection attempt only.
-     * On success the port is persisted to [SettingsRepository] so the next
-     * app launch can skip the rotation. On explicit user disconnect or
-     * setup-clear the stored port is cleared automatically via [resetPortState].
-     */
+    fun connect() {
+        viewModelScope.launch {
+            val rawConfig = setupRepository.getWireGuardConfig()
+            if (rawConfig.isEmpty()) {
+                Timber.w("VpnViewModel: no WireGuard config available")
+                return@launch
+            }
+
+            val originalPort = try {
+                TunnelConfig.parse(rawConfig).getServerPort()
+            } catch (_: Exception) { 51820 }
+
+            portRotator = PortRotator(originalPort)
+
+            val lastSuccessfulPort = settingsRepository.getLastSuccessfulPort().first()
+            val configToConnect = if (lastSuccessfulPort != 0 && lastSuccessfulPort != originalPort) {
+                Timber.d("VpnViewModel: trying persisted port $lastSuccessfulPort")
+                activePort = lastSuccessfulPort
+                replaceEndpointPort(rawConfig, lastSuccessfulPort)
+            } else {
+                activePort = null
+                rawConfig
+            }
+
+            // 服务器模式：拉取 split-tunnel preset；纯 WG 模式：用空配置
+            val serverUrl = setupRepository.getServerUrl()
+            val splitConfig = if (setupRepository.isWireGuardOnlyMode()) {
+                SplitTunnelConfig()
+            } else {
+                // 服务器模式：预解析 DNS
+                if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
+                    try {
+                        val host = java.net.URI(serverUrl).host
+                        if (host != null) apiClientProvider.preResolveDns(host)
+                    } catch (_: Exception) {}
+                }
+                resolveSplitTunnelConfig(serverUrl)
+            }
+            lastSplitTunnelConfig = splitConfig
+
+            try {
+                tunnelManager.connect(configToConnect, splitConfig)
+                Timber.d("VpnViewModel: tunnel connect requested")
+                if (!setupRepository.isWireGuardOnlyMode()) {
+                    reportDeviceHostname(serverUrl)
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "VpnViewModel: connect failed")
+            }
+        }
+    }
+
+    fun disconnect() {
+        viewModelScope.launch {
+            try {
+                tunnelManager.disconnect()
+                _stats.value = TunnelStats()
+                if (!setupRepository.isWireGuardOnlyMode()) {
+                    apiClientProvider.clearDnsCache()
+                }
+                resetPortState()
+                Timber.d("VpnViewModel: tunnel disconnected")
+            } catch (e: Exception) {
+                Timber.e(e, "VpnViewModel: disconnect failed")
+            }
+        }
+    }
+
+    // ── Port rotation ─────────────────────────────────────────────────────────
+
     private suspend fun reconnectWithPort(port: Int?) {
         val rawConfig = setupRepository.getWireGuardConfig()
         if (rawConfig.isEmpty()) return
@@ -198,8 +247,6 @@ class VpnViewModel @Inject constructor(
         try {
             tunnelManager.connect(configToUse, lastSplitTunnelConfig)
             Timber.d("VpnViewModel: reconnected on port ${port ?: "original"}")
-
-            // Persist the successful port so the next launch uses it directly
             if (port != null) {
                 settingsRepository.saveSuccessfulPort(port)
                 Timber.i("VpnViewModel: persisted successful port $port")
@@ -209,22 +256,15 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Replaces the `Endpoint = host:port` line in the raw WireGuard config
-     * string without touching the stored copy.  Handles both plain IPv4/hostname
-     * and bracketed IPv6 endpoints (`[::1]:port`).
-     */
     internal fun replaceEndpointPort(config: String, port: Int): String =
         config.lines().joinToString("\n") { line ->
             val trimmed = line.trim()
             if (trimmed.startsWith("Endpoint", ignoreCase = true) && trimmed.contains("=")) {
                 val eqIndex = line.indexOf('=')
-                val prefix = line.substring(0, eqIndex + 1)   // keep indent + "="
+                val prefix = line.substring(0, eqIndex + 1)
                 val value = line.substring(eqIndex + 1).trim()
                 val hostPart = when {
-                    // IPv6 bracketed: [::1]:51820 → strip last :port
                     value.startsWith("[") -> value.substringBeforeLast(":")
-                    // IPv4 / hostname: 1.2.3.4:51820 → strip last :port
                     else -> value.substringBeforeLast(":")
                 }
                 "$prefix $hostPart:$port"
@@ -233,77 +273,6 @@ class VpnViewModel @Inject constructor(
             }
         }
 
-    // ── Connect / Disconnect ──────────────────────────────────────────────────
-
-    fun connect() {
-        viewModelScope.launch {
-            val rawConfig = setupRepository.getWireGuardConfig()
-            if (rawConfig.isEmpty()) {
-                Timber.w("VpnViewModel: no WireGuard config available")
-                return@launch
-            }
-
-            val serverUrl = setupRepository.getServerUrl()
-            val hasValidServer = serverUrl.startsWith("http://") || serverUrl.startsWith("https://")
-            if (hasValidServer) {
-                try {
-                    val host = java.net.URI(serverUrl).host
-                    if (host != null) apiClientProvider.preResolveDns(host)
-                } catch (_: Exception) {}
-            }
-
-            // Initialise the PortRotator from the original endpoint port.
-            // Also check if we have a previously successful port to try first.
-            val originalPort = try {
-                TunnelConfig.parse(rawConfig).getServerPort()
-            } catch (_: Exception) { 51820 }
-
-            portRotator = PortRotator(originalPort)
-
-            // If a successful port was persisted, try it immediately
-            val lastSuccessfulPort = settingsRepository.getLastSuccessfulPort().first()
-            val configToConnect = if (lastSuccessfulPort != 0 && lastSuccessfulPort != originalPort) {
-                Timber.d("VpnViewModel: trying persisted port $lastSuccessfulPort")
-                activePort = lastSuccessfulPort
-                replaceEndpointPort(rawConfig, lastSuccessfulPort)
-            } else {
-                activePort = null
-                rawConfig
-            }
-
-            // Resolve split-tunnel config
-            val splitConfig = resolveSplitTunnelConfig(serverUrl)
-            lastSplitTunnelConfig = splitConfig
-
-            try {
-                tunnelManager.connect(configToConnect, splitConfig)
-                Timber.d("VpnViewModel: tunnel connect requested")
-                reportDeviceHostname(serverUrl)
-            } catch (e: Exception) {
-                Timber.e(e, "VpnViewModel: connect failed")
-            }
-        }
-    }
-
-    fun disconnect() {
-        viewModelScope.launch {
-            try {
-                tunnelManager.disconnect()
-                _stats.value = TunnelStats()
-                apiClientProvider.clearDnsCache()
-                // Restore original port on explicit user disconnect
-                resetPortState()
-                Timber.d("VpnViewModel: tunnel disconnected, DNS cache cleared")
-            } catch (e: Exception) {
-                Timber.e(e, "VpnViewModel: disconnect failed")
-            }
-        }
-    }
-
-    /**
-     * Clears the persisted successful port and resets in-memory rotation state.
-     * Called on user disconnect, setup clear, or peer disabled.
-     */
     private suspend fun resetPortState() {
         activePort = null
         portRotator?.reset()
@@ -311,7 +280,7 @@ class VpnViewModel @Inject constructor(
         Timber.d("VpnViewModel: port state reset to original")
     }
 
-    // ── Peer check ────────────────────────────────────────────────────────────
+    // ── 对等节点检查（仅服务器模式）──────────────────────────────────────────
 
     private suspend fun checkPeerEnabled() {
         try {
@@ -333,7 +302,7 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // ── Other actions ─────────────────────────────────────────────────────────
+    // ── 辅助功能 ──────────────────────────────────────────────────────────────
 
     fun toggleKillSwitch(enabled: Boolean) {
         viewModelScope.launch {
@@ -343,6 +312,7 @@ class VpnViewModel @Inject constructor(
     }
 
     fun loadTrafficStats() {
+        if (setupRepository.isWireGuardOnlyMode()) return
         viewModelScope.launch {
             try {
                 val serverUrl = setupRepository.getServerUrl()
@@ -358,6 +328,7 @@ class VpnViewModel @Inject constructor(
     }
 
     fun loadServices() {
+        if (setupRepository.isWireGuardOnlyMode()) return
         viewModelScope.launch {
             try {
                 val serverUrl = setupRepository.getServerUrl()
@@ -380,6 +351,10 @@ class VpnViewModel @Inject constructor(
         }
 
     fun runDnsLeakTest(onResult: (String) -> Unit) {
+        if (setupRepository.isWireGuardOnlyMode()) {
+            onResult("DNS leak test not available in WireGuard-only mode")
+            return
+        }
         viewModelScope.launch {
             try {
                 val serverUrl = setupRepository.getServerUrl()
@@ -399,6 +374,7 @@ class VpnViewModel @Inject constructor(
     fun invalidateApiClients() = apiClientProvider.invalidate()
 
     fun loadPermissions() {
+        if (setupRepository.isWireGuardOnlyMode()) return
         viewModelScope.launch {
             try {
                 val serverUrl = setupRepository.getServerUrl()
@@ -420,7 +396,7 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // ── Split-tunnel helpers ──────────────────────────────────────────────────
+    // ── Split-tunnel（仅服务器模式）───────────────────────────────────────────
 
     private suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
         var splitTunnelConfig = SplitTunnelConfig()
@@ -439,7 +415,6 @@ class VpnViewModel @Inject constructor(
                         settingsRepository.setSplitTunnelNetworks(arr.toString())
                         settingsRepository.setSplitTunnelAdminLocked(preset.locked)
                         adminPresetActive = true
-
                         val userApps = settingsRepository.getSplitTunnelAppsV2().first()
                         splitTunnelConfig = SplitTunnelConfig(
                             mode = preset.mode,
@@ -470,11 +445,7 @@ class VpnViewModel @Inject constructor(
     }
 
     private fun reportDeviceHostname(serverUrl: String) {
-        // Guard: skip if serverUrl is empty or not a valid http(s) URL.
-        // An invalid URL (e.g. "/" when no server is configured) would cause
-        // ApiClientProvider.buildClient() to throw IllegalArgumentException.
         if (serverUrl.isEmpty() || (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://"))) {
-            Timber.d("VpnViewModel: reportDeviceHostname skipped — invalid serverUrl: '$serverUrl'")
             return
         }
         viewModelScope.launch {
