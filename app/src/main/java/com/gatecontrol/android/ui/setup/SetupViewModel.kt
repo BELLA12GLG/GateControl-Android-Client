@@ -47,7 +47,7 @@ class SetupViewModel @Inject constructor(
         SetupUiState(
             serverUrl = setupRepository.getServerUrl(),
             apiToken = setupRepository.getApiToken(),
-            isSetupComplete = setupRepository.isAnyModeConfigured(),
+            isSetupComplete = setupRepository.isConfigured() || setupRepository.hasWireGuardConfig(),
         ),
     )
     val uiState: StateFlow<SetupUiState> = _uiState.asStateFlow()
