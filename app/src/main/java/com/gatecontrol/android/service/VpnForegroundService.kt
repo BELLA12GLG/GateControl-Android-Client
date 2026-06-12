@@ -11,10 +11,14 @@ import androidx.core.app.NotificationCompat
 import com.gatecontrol.android.MainActivity
 import com.gatecontrol.android.R
 import com.gatecontrol.android.common.Formatters
+import com.gatecontrol.android.data.SetupRepository
 import com.gatecontrol.android.tunnel.PortRotator
+import com.gatecontrol.android.tunnel.SplitTunnelConfig
 import com.gatecontrol.android.tunnel.TunnelConfig
+import com.gatecontrol.android.tunnel.TunnelManager
 import com.gatecontrol.android.tunnel.TunnelMonitor
 import com.gatecontrol.android.tunnel.TunnelStats
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,46 +27,47 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import javax.inject.Inject
 
 /**
  * Foreground service that keeps the VPN notification visible and runs
  * [TunnelMonitor] while the tunnel is active.
  *
- * Responsibilities:
- *  - Show the persistent VPN notification with live stats
- *  - Run [TunnelMonitor] with the two-tier detection strategy (local traffic
- *    fast-check every 5 s → handshake stale-check every ~30 s)
- *  - Forward [TunnelMonitor.reconnectEvent] to [TunnelStateHolder.reconnectEvents]
- *    so [VpnViewModel] can handle port-swap + reconnect when it is active
- *
- * The service survives screen-off because it is a foreground service, so
- * the monitor loop keeps running even when the ViewModel is destroyed.
+ * 支持两种工作模式（通过 [EXTRA_AUTO_CONNECT] 区分）：
+ *  - 服务器模式：由 VpnViewModel 负责连接，本服务只维护通知 + 监控
+ *  - 纯 WireGuard 模式：开机自启时本服务直接调用 [TunnelManager.connect]，
+ *    不依赖任何服务器接口
  */
+@AndroidEntryPoint
 class VpnForegroundService : VpnService() {
+
+    // ── Hilt 直接注入，不再依赖 TunnelStateHolder 静态持有 ─────────────────
+    @Inject lateinit var tunnelManager: TunnelManager
+    @Inject lateinit var setupRepository: SetupRepository
 
     companion object {
         const val CHANNEL_ID = "vpn_status"
         const val NOTIF_ID = 1001
         const val ACTION_DISCONNECT = "com.gatecontrol.android.ACTION_DISCONNECT"
         const val EXTRA_SERVER = "server"
+        const val EXTRA_AUTO_CONNECT = "auto_connect"   // Boolean：是否在服务启动时直接连接隧道
 
         const val EXTRA_RX_BYTES = "rx_bytes"
         const val EXTRA_TX_BYTES = "tx_bytes"
         const val EXTRA_CONNECTED_SINCE = "connected_since"
     }
 
-    // ── Coroutine scope — survives screen-off as a foreground service ──────────
     internal val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private var statsJob: Job? = null
     private var monitorJob: Job? = null
+    private var autoConnectJob: Job? = null
 
     private var serverLabel: String = ""
     private var rxBytes: Long = 0L
     private var txBytes: Long = 0L
     private var connectedSinceMs: Long = 0L
 
-    /** Shared most-recent stats snapshot, written by the 1-s stats job. */
     @Volatile private var latestStats: TunnelStats = TunnelStats()
 
     private var tunnelMonitor: TunnelMonitor? = null
@@ -86,42 +91,71 @@ class VpnForegroundService : VpnService() {
         txBytes = intent?.getLongExtra(EXTRA_TX_BYTES, 0L) ?: 0L
         connectedSinceMs = intent?.getLongExtra(EXTRA_CONNECTED_SINCE, System.currentTimeMillis())
             ?: System.currentTimeMillis()
+        val shouldAutoConnect = intent?.getBooleanExtra(EXTRA_AUTO_CONNECT, false) ?: false
 
         startForeground(NOTIF_ID, buildNotification())
         startStatsUpdater()
-        startTunnelMonitor()
 
-        Timber.d("VpnForegroundService: started, server=$serverLabel")
+        if (shouldAutoConnect) {
+            // 开机自启路径：直接连接隧道，无需 Activity / ViewModel
+            startAutoConnect()
+        } else {
+            // 正常路径：VpnViewModel 负责连接，本服务只维护通知 + 监控
+            startTunnelMonitor()
+        }
+
+        Timber.d("VpnForegroundService: started, server=$serverLabel autoConnect=$shouldAutoConnect")
         return START_STICKY
     }
 
     override fun onRevoke() {
         Timber.d("VpnForegroundService: revoked by system")
-        stopMonitor()
-        statsJob?.cancel()
+        stopAllJobs()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopMonitor()
-        statsJob?.cancel()
+        stopAllJobs()
     }
 
-    // ── TunnelMonitor integration ─────────────────────────────────────────────
+    // ── 开机自启：直接连接隧道（纯 WireGuard 模式）────────────────────────
+
+    private fun startAutoConnect() {
+        autoConnectJob?.cancel()
+        autoConnectJob = serviceScope.launch(Dispatchers.IO) {
+            try {
+                val rawConfig = setupRepository.getWireGuardConfig()
+                if (rawConfig.isEmpty()) {
+                    Timber.w("VpnForegroundService: no WireGuard config available, cannot auto-connect")
+                    return@launch
+                }
+
+                Timber.d("VpnForegroundService: auto-connecting tunnel (pure WireGuard mode)")
+                // 纯 WireGuard 模式：不拉取服务器 split-tunnel preset，使用空配置
+                tunnelManager.connect(rawConfig, SplitTunnelConfig())
+                connectedSinceMs = System.currentTimeMillis()
+                Timber.i("VpnForegroundService: tunnel auto-connected successfully")
+
+                // 连接成功后再启动监控
+                startTunnelMonitor()
+            } catch (e: Exception) {
+                Timber.e(e, "VpnForegroundService: auto-connect failed")
+            }
+        }
+    }
+
+    // ── TunnelMonitor 集成 ────────────────────────────────────────────────────
 
     private fun startTunnelMonitor() {
         stopMonitor()
 
-        val tm = TunnelStateHolder.tunnelManager ?: run {
-            Timber.w("VpnForegroundService: TunnelManager not available — monitor not started")
-            return
-        }
+        // 使用 Hilt 注入的 tunnelManager（@AndroidEntryPoint 保证非 null）
+        val tm = tunnelManager
 
-        // Build a PortRotator from the stored config's original port
         val portRotator: PortRotator? = try {
-            val rawConfig = TunnelStateHolder.setupRepository?.getWireGuardConfig() ?: ""
+            val rawConfig = setupRepository.getWireGuardConfig()
             if (rawConfig.isNotEmpty()) {
                 val originalPort = TunnelConfig.parse(rawConfig).getServerPort()
                 PortRotator(originalPort)
@@ -133,7 +167,7 @@ class VpnForegroundService : VpnService() {
 
         val monitor = TunnelMonitor(
             trafficCheckIntervalMs = 5_000L,
-            stallCyclesBeforeHandshakeCheck = 6,   // 6 × 5 s = 30 s before escalating
+            stallCyclesBeforeHandshakeCheck = 6,
             maxHandshakeAgeSec = 180L,
             maxReconnectAttempts = 10,
             failuresBeforeDisconnect = 3,
@@ -142,18 +176,11 @@ class VpnForegroundService : VpnService() {
 
         monitor.start(
             scope = serviceScope,
-            // Tier 2: suspending backend query (used only when traffic is idle)
             statsProvider = { tm.getStatistics() },
-            // Tier 1: in-memory snapshot — zero network I/O
             localStats = { latestStats },
             portRotator = portRotator,
         )
 
-        // Forward reconnect events to TunnelStateHolder so the ViewModel can
-        // handle them (port-swap + connect). When the ViewModel is not active
-        // the tryEmit call is non-blocking — the event may be dropped, which
-        // is acceptable because the monitor will emit another after the next
-        // back-off delay.
         monitorJob = serviceScope.launch {
             monitor.reconnectEvent.collect { req ->
                 Timber.i(
@@ -174,7 +201,13 @@ class VpnForegroundService : VpnService() {
         monitorJob = null
     }
 
-    // ── Notification ──────────────────────────────────────────────────────────
+    private fun stopAllJobs() {
+        stopMonitor()
+        statsJob?.cancel()
+        autoConnectJob?.cancel()
+    }
+
+    // ── 通知 ──────────────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
@@ -236,17 +269,13 @@ class VpnForegroundService : VpnService() {
     private fun startStatsUpdater() {
         statsJob?.cancel()
         statsJob = serviceScope.launch {
-            val tm = TunnelStateHolder.tunnelManager
             val nm = getSystemService(NotificationManager::class.java)
             while (isActive) {
                 delay(1_000)
-                // Update in-memory snapshot used by TunnelMonitor Tier 1 check
-                if (tm != null) {
-                    tm.getStatistics()?.let { stats ->
-                        latestStats = stats
-                        rxBytes = stats.rxBytes
-                        txBytes = stats.txBytes
-                    }
+                tunnelManager.getStatistics()?.let { stats ->
+                    latestStats = stats
+                    rxBytes = stats.rxBytes
+                    txBytes = stats.txBytes
                 }
                 nm.notify(NOTIF_ID, buildNotification())
             }
