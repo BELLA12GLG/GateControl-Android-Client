@@ -171,6 +171,11 @@ class TunnelManager @Inject constructor(private val context: Context) {
                 }
             } catch (_: Exception) {
                 Timber.d("Handshake timestamp not available from Statistics API")
+                // When reflection fails we cannot determine handshake age.
+                // Use current time so TunnelMonitor does NOT treat this as stale
+                // and trigger a false reconnect (e.g. on devices where the
+                // WireGuard library version doesn't expose latestHandshakeEpochMillis).
+                latestHandshake = System.currentTimeMillis()
             }
 
             val rxSpeed = if (elapsedSec > 0) ((totalRx - prevRxBytes) / elapsedSec).toLong() else 0L
