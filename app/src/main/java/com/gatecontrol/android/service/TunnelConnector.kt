@@ -15,11 +15,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Shared connect path used by every entry point that starts the tunnel
- * (in-app VPN screen, Quick Settings tile, future auto-connect). Centralises
- * split-tunnel resolution and the DNS pre-resolve step so secondary entry
- * points cannot bring up the tunnel without applying the user's app and
- * network exceptions.
+ * 所有入口点（VPN 界面、快捷磁贴、开机自启）共用的连接路径。
+ *
+ * 支持两种模式：
+ *  - 服务器模式：拉取 split-tunnel preset、预解析 DNS、上报主机名
+ *  - 纯 WireGuard 模式（[SetupRepository.isWireGuardOnlyMode]）：跳过所有服务器调用，
+ *    直接用本地存储的 WireGuard 配置连接，不崩溃
  */
 @Singleton
 class TunnelConnector @Inject constructor(
@@ -36,22 +37,32 @@ class TunnelConnector @Inject constructor(
             return false
         }
 
+        // 纯 WireGuard 模式：跳过所有服务器交互
+        if (setupRepository.isWireGuardOnlyMode()) {
+            Timber.d("TunnelConnector: WireGuard-only mode — skipping server calls")
+            return connectTunnel(config, SplitTunnelConfig(), serverUrl = "")
+        }
+
         val serverUrl = setupRepository.getServerUrl()
 
-        // Pre-resolve server hostname before the tunnel comes up. Once the
-        // VPN is established the system DNS points to 10.8.0.1, which is
-        // unreachable from the GateControl app itself when the app is in
-        // the user's exclude list.
+        // 服务器模式：预解析 DNS（VPN 建立后系统 DNS 会改变）
         if (serverUrl.isNotEmpty()) {
             try {
                 val host = java.net.URI(serverUrl).host
                 if (host != null) apiClientProvider.preResolveDns(host)
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }
 
         val splitTunnelConfig = resolveSplitTunnelConfig(serverUrl)
 
+        return connectTunnel(config, splitTunnelConfig, serverUrl)
+    }
+
+    private suspend fun connectTunnel(
+        config: String,
+        splitTunnelConfig: SplitTunnelConfig,
+        serverUrl: String,
+    ): Boolean {
         return try {
             tunnelManager.connect(config, splitTunnelConfig)
             Timber.d(
@@ -60,7 +71,7 @@ class TunnelConnector @Inject constructor(
                 splitTunnelConfig.networks.size,
                 splitTunnelConfig.apps.size,
             )
-            reportDeviceHostname(serverUrl)
+            if (serverUrl.isNotEmpty()) reportDeviceHostname(serverUrl)
             true
         } catch (e: Exception) {
             Timber.e(e, "TunnelConnector: connect failed")
