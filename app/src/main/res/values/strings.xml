@@ -213,6 +213,12 @@
     <string name="tile_label">GateControl VPN</string>
     <string name="tile_not_connected">Not connected</string>
 
+    <!-- 后加 -->
+    <string name="vpn_permission_required_title">VPN Permission Required</string>
+    <string name="vpn_permission_required_body">Please open GateControl to re-grant VPN permissions to enable auto-start at boot.</string>
+
+
+
     <!-- Common -->
     <string name="cancel">Cancel</string>
     <string name="ok">OK</string>
