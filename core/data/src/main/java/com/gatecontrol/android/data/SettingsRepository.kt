@@ -29,8 +29,6 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
         val SPLIT_TUNNEL_ADMIN_LOCKED = booleanPreferencesKey("split_tunnel_admin_locked")
         val CHECK_INTERVAL = intPreferencesKey("check_interval")
         val CONFIG_POLL_INTERVAL = intPreferencesKey("config_poll_interval")
-        /** Port that last produced a successful WireGuard handshake. 0 = use original. */
-        val LAST_SUCCESSFUL_PORT = intPreferencesKey("last_successful_port")
     }
 
     fun getTheme(): Flow<String> = dataStore.data.map { it[THEME] ?: "system" }
@@ -168,19 +166,20 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
         dataStore.edit { it[CONFIG_POLL_INTERVAL] = clamped }
     }
 
-    // ── Port rotation persistence ─────────────────────────────────────────────
+    // ── Port rotation（内存持有，不写 DataStore）─────────────────────────────
+    // 频繁写入 DataStore 会增加强制重启时 proto 文件损坏的概率。
+    // 该值只是本次运行的优化提示：跳过端口重试，进程重启后从原始端口重新探测即可。
 
-    /** Returns the last port that produced a successful handshake, or 0 if none. */
+    @Volatile private var lastSuccessfulPort: Int = 0
+
     fun getLastSuccessfulPort(): Flow<Int> =
-        dataStore.data.map { it[LAST_SUCCESSFUL_PORT] ?: 0 }
+        kotlinx.coroutines.flow.flow { emit(lastSuccessfulPort) }
 
-    /** Persists a port after a successful reconnect so the next launch uses it. */
     suspend fun saveSuccessfulPort(port: Int) {
-        dataStore.edit { it[LAST_SUCCESSFUL_PORT] = port }
+        lastSuccessfulPort = port
     }
 
-    /** Clears the persisted port (call on user disconnect / setup clear). */
     suspend fun clearSuccessfulPort() {
-        dataStore.edit { it.remove(LAST_SUCCESSFUL_PORT) }
+        lastSuccessfulPort = 0
     }
 }
