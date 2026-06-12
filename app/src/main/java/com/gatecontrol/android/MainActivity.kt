@@ -66,7 +66,7 @@ class MainActivity : ComponentActivity() {
             GateControlTheme(darkTheme = isDark) {
                 val navController = rememberNavController()
                 val isSetupComplete =
-                    setupRepository.isConfigured() || setupRepository.hasWireGuardConfig()
+                    setupRepository.isAnyModeConfigured()
                 val permissions by licenseRepository.permissions
                     .collectAsStateWithLifecycle()
 
