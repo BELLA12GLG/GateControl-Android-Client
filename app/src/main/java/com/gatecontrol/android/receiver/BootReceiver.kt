@@ -5,8 +5,8 @@ import android.content.Context
 import android.content.Intent
 import com.gatecontrol.android.data.SettingsRepository
 import com.gatecontrol.android.data.SetupRepository
-import com.gatecontrol.android.service.VpnForegroundService
 import com.gatecontrol.android.network.ApiClientProvider
+import com.gatecontrol.android.service.VpnForegroundService
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,7 +67,8 @@ class BootReceiver : BroadcastReceiver() {
                 Timber.d("BootReceiver: starting VPN (serverMode=$serverMode)")
                 val serviceIntent = Intent(context, VpnForegroundService::class.java).apply {
                     putExtra(VpnForegroundService.EXTRA_SERVER, serverUrl)
-                    putExtra(VpnForegroundService.EXTRA_AUTO_CONNECT, true)
+                    // 使用字符串字面量，避免 Hilt kapt 生成顺序问题导致的编译错误
+                    putExtra("auto_connect", true)
                 }
                 context.startForegroundService(serviceIntent)
 
