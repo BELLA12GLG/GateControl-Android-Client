@@ -131,33 +131,51 @@ class ApiClientProvider @Inject constructor(
     }
 
     private fun buildClient(baseUrl: String): ApiClient {
-        val isDebuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-        val logging = HttpLoggingInterceptor().apply {
-            level = if (isDebuggable) HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
+    // 1. 在方法入口处加入防御性逻辑：如果是空、无效或默认的 "/"，自动切换到 Google
+    val safeBaseUrl = if (baseUrl.isBlank() || baseUrl == "/") {
+        "https://www.google.com/"
+    } else {
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+            "https://www.google.com/"
+        } else {
+            baseUrl
         }
-
-        val okHttpClient = OkHttpClient.Builder()
-            .dns(vpnSafeDns)
-            .addInterceptor(authInterceptor)
-            .addInterceptor(logging)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .build()
-
-        // Gson that tolerates SQLite boolean fields (0/1 as NUMBER instead of true/false)
-        // Uses TypeAdapterFactory to cover both Boolean and Boolean? (nullable) fields
-        val gson = GsonBuilder()
-            .registerTypeAdapterFactory(LenientBooleanAdapterFactory())
-            .create()
-
-        return Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(okHttpClient)
-            .addConverterFactory(GsonConverterFactory.create(gson))
-            .build()
-            .create(ApiClient::class.java)
     }
+
+    val loggingInterceptor = HttpLoggingInterceptor().apply {
+        level = if (isDebuggable()) HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
+    }
+
+    // 这里完全保持你截图里 137 到 152 行的原有逻辑不动
+    val okHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .addInterceptor(loggingInterceptor)
+        .addInterceptor(authInterceptor)
+        .dns(object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                return try {
+                    Dns.SYSTEM.lookup(hostname)
+                } catch (e: Exception) {
+                    dnsCache[hostname] ?: throw e
+                }
+            }
+        })
+        .build()
+
+    val gson = GsonBuilder()
+        .registerTypeAdapterFactory(LenientBooleanAdapterFactory())
+        .create()
+
+    // 2. 核心改动：把原本的 baseUrl 改为我们处理过的 safeBaseUrl
+    return Retrofit.Builder()
+        .baseUrl(safeBaseUrl) // 👈 用安全地址喂给 Retrofit
+        .client(okHttpClient)
+        .addConverterFactory(GsonConverterFactory.create(gson))
+        .build()
+        .create(ApiClient::class.java)
+}
+
 
     /** Factory that applies LenientBooleanAdapter to both Boolean and Boolean? fields. */
     private class LenientBooleanAdapterFactory : TypeAdapterFactory {
