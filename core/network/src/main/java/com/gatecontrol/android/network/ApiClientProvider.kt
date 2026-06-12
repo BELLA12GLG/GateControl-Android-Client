@@ -17,6 +17,7 @@ import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.net.InetAddress
+import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -29,155 +30,105 @@ class ApiClientProvider @Inject constructor(
 ) {
     private val cache = mutableMapOf<String, ApiClient>()
     private val lock = Any()
-
-    /**
-     * DNS cache for VPN-safe resolution. When the VPN is active, Android's
-     * system DNS points to the VPN-internal resolver (10.8.0.1) but the
-     * GateControl app is excluded from the VPN (VpnService requirement).
-     * System DNS lookups fail with EAI_NODATA because 10.8.0.1 is unreachable
-     * outside the tunnel. We cache DNS results resolved BEFORE the VPN starts
-     * and fall back to the cache when system DNS fails.
-     */
+    
+    // 保留文件1强大的高可靠内存 DNS 缓存
     private val dnsCache = ConcurrentHashMap<String, List<InetAddress>>()
 
     /**
-     * Resolve and cache the server hostname. Safe to call from any thread.
-     * Re-resolves to pick up DNS changes, but rejects VPN-internal addresses
-     * (10.8.x.x) that appear when the tunnel's split-horizon DNS is active.
-     * Call clearDnsCache() on disconnect so the next connect starts fresh.
+     * 预解析域名 IP，防止拉起 VPN 后 excluded 应用遭遇 Android 系统 DNS 路由死锁
      */
-    suspend fun preResolveDns(hostname: String) {
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val addresses = InetAddress.getAllByName(hostname)
-                if (addresses.isNotEmpty()) {
-                    // Reject VPN-internal addresses — when the tunnel is up,
-                    // system DNS may return the VPN gateway (10.8.0.1) instead
-                    // of the real public IP.
-                    val isVpnInternal = addresses.all { addr ->
-                        val ip = addr.hostAddress ?: ""
-                        ip.startsWith("10.8.")
-                    }
-                    if (isVpnInternal) {
-                        timber.log.Timber.d("DNS for $hostname returned VPN-internal address — keeping cache")
-                        return@withContext
-                    }
+    fun preResolveDns(baseUrlStr: String) {
+        if (baseUrlStr.isBlank() || baseUrlStr == "/") return
+        try {
+            val url = URL(baseUrlStr)
+            val host = url.host
+            if (host.isNullOrBlank()) return
 
-                    val prev = dnsCache[hostname]?.map { it.hostAddress }
-                    dnsCache[hostname] = addresses.toList()
-                    val resolved = addresses.map { it.hostAddress }
-                    if (prev != null && prev != resolved) {
-                        timber.log.Timber.i("DNS changed for $hostname: $prev -> $resolved")
-                    } else {
-                        timber.log.Timber.d("DNS pre-resolved: $hostname -> $resolved")
-                    }
-                }
-            } catch (e: Exception) {
-                if (dnsCache.containsKey(hostname)) {
-                    timber.log.Timber.d("DNS re-resolve failed for $hostname, keeping cached entry: ${e.message}")
-                } else {
-                    timber.log.Timber.w("DNS pre-resolve failed for $hostname: ${e.message}")
-                }
+            val addresses = Dns.SYSTEM.lookup(host)
+            // 过滤掉 VPN 内部的私有网段（例如 10.8.x.x），只保留真正的公网出口 IP
+            val filtered = addresses.filter { !it.hostAddress.startsWith("10.8.") }
+            if (filtered.isNotEmpty()) {
+                dnsCache[host] = filtered
+            }
+        } catch (_: Exception) {
+            // 预解析失败不破坏主流程，交由运行时动态处理
+        }
+    }
+
+    fun clearDnsCache() {
+        dnsCache.clear()
+    }
+
+    /**
+     * 获取或创建 API 客户端
+     */
+    fun getClient(baseUrl: String): ApiClient {
+        synchronized(lock) {
+            // 核心修复：如果传进来的是空或斜杠，我们在最外层就统一收敛其 Key，避免缓存污染
+            val targetKey = if (baseUrl.isBlank() || baseUrl == "/") "https://www.google.com/" else baseUrl
+            return cache.getOrPut(targetKey) {
+                buildClient(targetKey)
             }
         }
     }
 
     /**
-     * Clear the DNS cache. Call on VPN disconnect so the next connect
-     * picks up any DNS changes that occurred while the tunnel was active.
+     * 构建真正的 Retrofit 客户端
      */
-    fun clearDnsCache() {
-        dnsCache.clear()
-        timber.log.Timber.d("DNS cache cleared")
-    }
-
-    private val vpnSafeDns = object : Dns {
-        override fun lookup(hostname: String): List<InetAddress> {
-            // System DNS may return VPN-internal addresses (10.8.x.x) even
-            // when the GateControl app is excluded from the tunnel: Android
-            // caches the WG-internal resolver's answer system-wide. The app
-            // can't reach 10.8.0.1 from outside the tunnel, so OkHttp would
-            // hit SocketTimeout from the local Wi-Fi IP / ECONNREFUSED via
-            // VPN. Filter those out and prefer the pre-resolve cache,
-            // which preResolveDns() guarantees never holds 10.8.x.x.
-            val systemResults = try {
-                Dns.SYSTEM.lookup(hostname).filter { addr ->
-                    val ip = addr.hostAddress ?: ""
-                    !ip.startsWith("10.8.")
-                }
-            } catch (_: Exception) {
-                emptyList()
-            }
-            if (systemResults.isNotEmpty()) return systemResults
-            return dnsCache[hostname] ?: throw java.net.UnknownHostException(
-                "DNS lookup failed for $hostname (system DNS returned only VPN-internal addresses, no cache)"
-            )
-        }
-    }
-
-    fun getClient(baseUrl: String): ApiClient {
-        val normalizedUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
-        return synchronized(lock) {
-            cache.getOrPut(normalizedUrl) {
-                buildClient(normalizedUrl)
-            }
-        }
-    }
-
-    fun invalidate() {
-        synchronized(lock) {
-            cache.clear()
-        }
-    }
-
     private fun buildClient(baseUrl: String): ApiClient {
-    // 1. 在方法入口处加入防御性逻辑：如果是空、无效或默认的 "/"，自动切换到 Google
-    val safeBaseUrl = if (baseUrl.isBlank() || baseUrl == "/") {
-        "https://www.google.com/"
-    } else {
-        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+        // 健壮性防御：二次确保协议头合法
+        val safeBaseUrl = if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
             "https://www.google.com/"
         } else {
             baseUrl
         }
-    }
 
-    val loggingInterceptor = HttpLoggingInterceptor().apply {
-        level = if (isDebuggable()) HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
-    }
+        val loggingInterceptor = HttpLoggingInterceptor().apply {
+            level = if (isDebuggable()) HttpLoggingInterceptor.Level.BODY else HttpLoggingInterceptor.Level.NONE
+        }
 
-    // 这里完全保持你截图里 137 到 152 行的原有逻辑不动
-    val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .addInterceptor(loggingInterceptor)
-        .addInterceptor(authInterceptor)
-        .dns(object : Dns {
-            override fun lookup(hostname: String): List<InetAddress> {
-                return try {
-                    Dns.SYSTEM.lookup(hostname)
-                } catch (e: Exception) {
-                    dnsCache[hostname] ?: throw e
+        // 组装兼顾“系统级突围”与“自研内存DNS兜底”的 OkHttpClient
+        val okHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .addInterceptor(loggingInterceptor)
+            .addInterceptor(authInterceptor)
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    return try {
+                        Dns.SYSTEM.lookup(hostname)
+                    } catch (e: Exception) {
+                        // 当 VPN 拉起导致系统 DNS 瘫痪时，这里是整个 App 的最后一面网络盾牌
+                        dnsCache[hostname] ?: throw e
+                    }
                 }
-            }
-        })
-        .build()
+            })
+            .build()
 
-    val gson = GsonBuilder()
-        .registerTypeAdapterFactory(LenientBooleanAdapterFactory())
-        .create()
+        val gson = GsonBuilder()
+            .registerTypeAdapterFactory(LenientBooleanAdapterFactory())
+            .create()
 
-    // 2. 核心改动：把原本的 baseUrl 改为我们处理过的 safeBaseUrl
-    return Retrofit.Builder()
-        .baseUrl(safeBaseUrl) // 👈 用安全地址喂给 Retrofit
-        .client(okHttpClient)
-        .addConverterFactory(GsonConverterFactory.create(gson))
-        .build()
-        .create(ApiClient::class.java)
-}
+        return Retrofit.Builder()
+            .baseUrl(safeBaseUrl)
+            .client(okHttpClient)
+            .addConverterFactory(GsonConverterFactory.create(gson))
+            .build()
+            .create(ApiClient::class.java)
+    }
 
+    /**
+     * 修复文件2中缺失的动态 Debug 状态读取函数
+     */
+    private fun isDebuggable(): Boolean {
+        return try {
+            (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        } catch (_: Exception) {
+            false
+        }
+    }
 
-    /** Factory that applies LenientBooleanAdapter to both Boolean and Boolean? fields. */
+    /** 允许宽松解析 Boolean 的适配器工厂 */
     private class LenientBooleanAdapterFactory : TypeAdapterFactory {
         @Suppress("UNCHECKED_CAST")
         override fun <T> create(gson: Gson, type: TypeToken<T>): TypeAdapter<T>? {
@@ -188,7 +139,6 @@ class ApiClientProvider @Inject constructor(
         }
     }
 
-    /** Reads JSON booleans, numbers (0/1), and strings ("true"/"false") as Boolean. */
     private class LenientBooleanAdapter : TypeAdapter<Boolean>() {
         override fun write(out: JsonWriter, value: Boolean?) {
             out.value(value)
