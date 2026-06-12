@@ -18,16 +18,14 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertInstanceOf
-import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
@@ -43,6 +41,9 @@ class VpnViewModelTest {
     private lateinit var apiClient: ApiClient
     private lateinit var tunnelManager: TunnelManager
     private lateinit var viewModel: VpnViewModel
+
+    private val SAMPLE_WG_CONFIG =
+        "[Interface]\nPrivateKey=abc\nAddress=10.0.0.1/32\n\n[Peer]\nPublicKey=xyz\nEndpoint=1.2.3.4:51820\nAllowedIPs=0.0.0.0/0"
 
     @BeforeEach
     fun setUp() {
@@ -62,14 +63,15 @@ class VpnViewModelTest {
         every { settingsRepository.getSplitTunnelMode() } returns flowOf("off")
         every { settingsRepository.getSplitTunnelNetworks() } returns flowOf("[]")
         every { settingsRepository.getSplitTunnelAppsV2() } returns flowOf("[]")
+        every { settingsRepository.getLastSuccessfulPort() } returns flowOf(0)
         every { setupRepository.getServerUrl() } returns "https://gate.example.com"
         every { setupRepository.getPeerId() } returns 42
         coEvery { apiClient.getSplitTunnelPreset() } returns SplitTunnelPresetResponse(
             ok = true, mode = "off", networks = emptyList(), locked = false, source = "none"
         )
         every { apiClientProvider.getClient(any()) } returns apiClient
-        every { tunnelManager.state } returns kotlinx.coroutines.flow.MutableStateFlow(TunnelState.Disconnected)
-        every { tunnelManager.stats } returns kotlinx.coroutines.flow.MutableStateFlow(com.gatecontrol.android.tunnel.TunnelStats())
+        every { tunnelManager.state } returns MutableStateFlow(TunnelState.Disconnected)
+        every { tunnelManager.stats } returns MutableStateFlow(com.gatecontrol.android.tunnel.TunnelStats())
 
         viewModel = VpnViewModel(
             setupRepository = setupRepository,
@@ -85,7 +87,7 @@ class VpnViewModelTest {
         Dispatchers.resetMain()
     }
 
-    // --- State tests ---
+    // ── State tests ───────────────────────────────────────────────────────────
 
     @Test
     fun `initial state is Disconnected`() = runTest {
@@ -95,9 +97,11 @@ class VpnViewModelTest {
         }
     }
 
+    // ── connect ───────────────────────────────────────────────────────────────
+
     @Test
     fun `connect calls tunnelManager with config`() = runTest {
-        every { setupRepository.getWireGuardConfig() } returns "[Interface]\nPrivateKey=abc\nAddress=10.0.0.1/32\n\n[Peer]\nPublicKey=xyz\nEndpoint=1.2.3.4:51820\nAllowedIPs=0.0.0.0/0"
+        every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
 
         viewModel.connect()
         testDispatcher.scheduler.advanceUntilIdle()
@@ -112,8 +116,45 @@ class VpnViewModelTest {
         viewModel.connect()
         testDispatcher.scheduler.advanceUntilIdle()
 
-        coVerify(exactly = 0) { tunnelManager.connect(any(), any<com.gatecontrol.android.tunnel.SplitTunnelConfig>()) }
+        coVerify(exactly = 0) {
+            tunnelManager.connect(any(), any<com.gatecontrol.android.tunnel.SplitTunnelConfig>())
+        }
     }
+
+    @Test
+    fun `connect uses persisted successful port when available`() = runTest {
+        every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
+        every { settingsRepository.getLastSuccessfulPort() } returns flowOf(443)
+
+        viewModel.connect()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        // tunnelManager.connect should have been called with config containing :443
+        coVerify {
+            tunnelManager.connect(
+                match { it.contains(":443") },
+                any<com.gatecontrol.android.tunnel.SplitTunnelConfig>(),
+            )
+        }
+    }
+
+    @Test
+    fun `connect uses original port when no persisted port`() = runTest {
+        every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
+        every { settingsRepository.getLastSuccessfulPort() } returns flowOf(0)
+
+        viewModel.connect()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        coVerify {
+            tunnelManager.connect(
+                match { it.contains(":51820") },
+                any<com.gatecontrol.android.tunnel.SplitTunnelConfig>(),
+            )
+        }
+    }
+
+    // ── disconnect ────────────────────────────────────────────────────────────
 
     @Test
     fun `disconnect calls tunnelManager disconnect`() = runTest {
@@ -124,7 +165,52 @@ class VpnViewModelTest {
     }
 
     @Test
-    fun `toggleKillSwitch saves to settings`() = runTest {
+    fun `disconnect clears successful port`() = runTest {
+        viewModel.disconnect()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        coVerify { settingsRepository.clearSuccessfulPort() }
+    }
+
+    // ── replaceEndpointPort ───────────────────────────────────────────────────
+
+    @Test
+    fun `replaceEndpointPort swaps IPv4 endpoint port`() {
+        val config = "Endpoint = 1.2.3.4:51820"
+        val result = viewModel.replaceEndpointPort(config, 443)
+        assertTrue(result.contains("1.2.3.4:443"), "Expected '1.2.3.4:443' in result: $result")
+        assertFalse(result.contains(":51820"), "Old port should be gone")
+    }
+
+    @Test
+    fun `replaceEndpointPort swaps IPv6 bracketed endpoint port`() {
+        val config = "Endpoint = [2001:db8::1]:51820"
+        val result = viewModel.replaceEndpointPort(config, 443)
+        assertTrue(result.contains("[2001:db8::1]:443"), "Expected IPv6 endpoint with new port")
+        assertFalse(result.contains(":51820"), "Old port should be gone")
+    }
+
+    @Test
+    fun `replaceEndpointPort leaves non-Endpoint lines unchanged`() {
+        val config = "PrivateKey = abc\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0"
+        val result = viewModel.replaceEndpointPort(config, 8080)
+        assertTrue(result.contains("PrivateKey = abc"))
+        assertTrue(result.contains("AllowedIPs = 0.0.0.0/0"))
+        assertTrue(result.contains("1.2.3.4:8080"))
+    }
+
+    @Test
+    fun `replaceEndpointPort handles hostname endpoint`() {
+        val config = "Endpoint = vpn.example.com:51820"
+        val result = viewModel.replaceEndpointPort(config, 53)
+        assertTrue(result.contains("vpn.example.com:53"))
+        assertFalse(result.contains(":51820"))
+    }
+
+    // ── Kill-switch ───────────────────────────────────────────────────────────
+
+    @Test
+    fun `toggleKillSwitch true saves true to settings`() = runTest {
         viewModel.toggleKillSwitch(true)
         testDispatcher.scheduler.advanceUntilIdle()
 
@@ -139,18 +225,13 @@ class VpnViewModelTest {
         coVerify { settingsRepository.setKillSwitch(false) }
     }
 
+    // ── Permissions ───────────────────────────────────────────────────────────
+
     @Test
     fun `loadPermissions updates license repository`() = runTest {
-        val flags = PermissionFlags(
-            services = true,
-            traffic = true,
-            dns = false,
-            rdp = true,
-        )
+        val flags = PermissionFlags(services = true, traffic = true, dns = false, rdp = true)
         coEvery { apiClient.getPermissions() } returns PermissionsResponse(
-            ok = true,
-            permissions = flags,
-            scopes = listOf("services", "traffic", "rdp"),
+            ok = true, permissions = flags, scopes = listOf("services", "traffic", "rdp"),
         )
 
         viewModel.loadPermissions()
@@ -158,26 +239,16 @@ class VpnViewModelTest {
 
         verify {
             licenseRepository.updatePermissions(
-                services = true,
-                traffic = true,
-                dns = false,
-                rdp = true,
+                services = true, traffic = true, dns = false, rdp = true,
             )
         }
     }
 
     @Test
     fun `loadPermissions updates permissions state flow`() = runTest {
-        val flags = PermissionFlags(
-            services = true,
-            traffic = false,
-            dns = true,
-            rdp = false,
-        )
+        val flags = PermissionFlags(services = true, traffic = false, dns = true, rdp = false)
         coEvery { apiClient.getPermissions() } returns PermissionsResponse(
-            ok = true,
-            permissions = flags,
-            scopes = listOf("services", "dns"),
+            ok = true, permissions = flags, scopes = listOf("services", "dns"),
         )
 
         viewModel.permissions.test {
