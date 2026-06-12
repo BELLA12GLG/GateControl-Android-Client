@@ -1,10 +1,8 @@
 package com.gatecontrol.android.data.di
 
 import android.content.Context
-import androidx.datastore.core.CorruptionHandler
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
 import com.gatecontrol.android.data.EncryptedStorage
 import com.gatecontrol.android.data.SettingsRepository
@@ -14,16 +12,10 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import timber.log.Timber
 import javax.inject.Singleton
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
-    name = "gatecontrol_settings",
-    corruptionHandler = CorruptionHandler { exception ->
-        // 不删除文件，只记录日志并返回空配置，避免崩溃
-        Timber.e(exception, "DataStore corrupted, using empty preferences")
-        emptyPreferences()
-    }
+    name = "gatecontrol_settings"
 )
 
 @Module
