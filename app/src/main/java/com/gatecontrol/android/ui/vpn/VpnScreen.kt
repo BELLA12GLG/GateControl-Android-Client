@@ -63,6 +63,7 @@ fun VpnScreen(
     val permissions by viewModel.permissions.collectAsState()
     val services by viewModel.services.collectAsState()
     val killSwitchEnabled by viewModel.killSwitchEnabled.collectAsState()
+    val activePort by viewModel.activePort.collectAsState()
 
     // Bandwidth history ring buffers (60 points each)
     val rxHistory = remember { mutableStateListOf<Long>() }
@@ -189,6 +190,7 @@ fun VpnScreen(
             StatsGrid(
                 stats = stats,
                 serverHost = viewModel.serverHost,
+                activePort = activePort,
                 connectedSince = connectedSince,
                 currentTimeMillis = tick,
                 locale = "en",
