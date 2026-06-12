@@ -73,7 +73,13 @@ class VpnViewModel @Inject constructor(
 
     // ── Port rotation state ───────────────────────────────────────────────────
 
-    private var activePort: Int? = null
+    private val _activePort = MutableStateFlow<Int?>(null)
+    val activePort: StateFlow<Int?> = _activePort.asStateFlow()
+
+    private var activePort: Int?
+        get() = _activePort.value
+        set(value) { _activePort.value = value }
+
     private var portRotator: PortRotator? = null
     private var lastSplitTunnelConfig: SplitTunnelConfig = SplitTunnelConfig()
 
