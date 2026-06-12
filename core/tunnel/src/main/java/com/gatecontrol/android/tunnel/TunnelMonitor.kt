@@ -125,9 +125,21 @@ class TunnelMonitor(
                 }
 
                 // ── Tier 2: handshake staleness check ────────────────────────
-                val stats = statsProvider()
-                val isFailure = stats == null ||
-                    isHandshakeStale(stats.lastHandshakeEpoch, maxHandshakeAgeSec)
+                // statsProvider queries the local WireGuard kernel interface.
+                // It should never need a server URL, but wrap in try/catch so
+                // any unexpected exception doesn't get misread as a failure and
+                // trigger an unwanted reconnect (e.g. when no server is set up).
+                val stats = try {
+                    statsProvider()
+                } catch (e: Exception) {
+                    noRxCycles = 0
+                    continue
+                }
+                // null means handshake data is unavailable (e.g. reflection not
+                // supported on this device/library version). Skip Tier 2 entirely
+                // — health detection relies solely on Tier 1 rx traffic check.
+                if (stats == null) continue
+                val isFailure = isHandshakeStale(stats.lastHandshakeEpoch, maxHandshakeAgeSec)
 
                 if (isFailure) {
                     consecutiveHandshakeFailures++
@@ -146,7 +158,7 @@ class TunnelMonitor(
 
                             delay(calculateBackoffMs(attempt))
 
-                            val retryStats = statsProvider()
+                            val retryStats = try { statsProvider() } catch (_: Exception) { null }
                             val recovered = retryStats != null &&
                                 !isHandshakeStale(retryStats.lastHandshakeEpoch, maxHandshakeAgeSec)
 
