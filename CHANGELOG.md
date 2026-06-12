@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1] - 2026-06-12
+
+### Changes
+- Create PortRotatorTest.kt
+
+---
+
 ## [1.6.0] - 2026-05-31
 
 ### Features
