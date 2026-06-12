@@ -1,27 +1,32 @@
 package com.gatecontrol.android.data
 
 import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKeys
 import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class EncryptedStorage @Inject constructor(context: Context) {
 
-    private val prefs by lazy {
+    private val prefs: SharedPreferences by lazy {
         try {
-            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+            // userAuthenticationRequired = false：开机时无需用户解锁屏幕即可访问 KeyStore，
+            // 这是开机自启 VPN 能读到 WireGuard 配置的关键前提。
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .setUserAuthenticationRequired(false)
+                .build()
             EncryptedSharedPreferences.create(
-                "gatecontrol_secure",
-                masterKeyAlias,
                 context,
+                "gatecontrol_secure",
+                masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
             )
         } catch (e: Exception) {
-            // Fallback to plain SharedPreferences if KeyStore fails
+            // 极端兜底：KeyStore 完全不可用时降级为明文（数据仍在 app 沙箱内）
             context.getSharedPreferences("gatecontrol_secure_fallback", Context.MODE_PRIVATE)
         }
     }
