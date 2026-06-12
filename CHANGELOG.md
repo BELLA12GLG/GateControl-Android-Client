@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.15] - 2026-06-12
+
+### Changes
+- 更新 BootReceiver.kt
+
+---
+
 ## [1.6.14] - 2026-06-12
 
 ### Changes
