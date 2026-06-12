@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.5] - 2026-06-12
+
+### Changes
+- 更新 ApiClientProvider.kt
+
+---
+
 ## [1.6.4] - 2026-06-12
 
 ### Changes
