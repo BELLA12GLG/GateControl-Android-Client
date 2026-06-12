@@ -13,6 +13,17 @@ object TunnelStateHolder {
     @Volatile var serverHost: String? = null
     @Volatile var tunnelManager: com.gatecontrol.android.tunnel.TunnelManager? = null
     @Volatile var setupRepository: com.gatecontrol.android.data.SetupRepository? = null
+
+    /**
+     * Bridge for [TunnelMonitor.reconnectEvent] -> [VpnViewModel].
+     *
+     * [VpnForegroundService] runs TunnelMonitor and forwards its events here.
+     * [VpnViewModel] collects from this flow and performs the port-swap + connect.
+     * replay=0: ViewModel only acts on live events; stale events are dropped safely.
+     */
+    val reconnectEvents = kotlinx.coroutines.flow.MutableSharedFlow<
+        com.gatecontrol.android.tunnel.TunnelMonitor.ReconnectRequest
+    >(extraBufferCapacity = 4)
 }
 
 /**
