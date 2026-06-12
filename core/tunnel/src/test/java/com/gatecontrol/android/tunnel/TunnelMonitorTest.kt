@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test
 
 class TunnelMonitorTest {
 
+    // ── Companion helper tests (unchanged behaviour) ──────────────────────────
+
     @Test
     fun `calculateBackoffMs returns 2000ms for attempt 0`() {
         assertEquals(2000L, TunnelMonitor.calculateBackoffMs(0))
@@ -17,21 +19,18 @@ class TunnelMonitorTest {
 
     @Test
     fun `calculateBackoffMs caps at 60000ms for high attempts`() {
-        val result = TunnelMonitor.calculateBackoffMs(100)
-        assertEquals(60_000L, result)
+        assertEquals(60_000L, TunnelMonitor.calculateBackoffMs(100))
     }
 
     @Test
     fun `calculateBackoffMs increases exponentially`() {
-        val attempt0 = TunnelMonitor.calculateBackoffMs(0)
-        val attempt1 = TunnelMonitor.calculateBackoffMs(1)
-        val attempt2 = TunnelMonitor.calculateBackoffMs(2)
-
-        assertTrue(attempt1 > attempt0, "attempt 1 should be greater than attempt 0")
-        assertTrue(attempt2 > attempt1, "attempt 2 should be greater than attempt 1")
-        // Verify the 1.5x growth factor roughly holds
-        assertEquals(3000L, attempt1) // 2000 * 1.5^1
-        assertEquals(4500L, attempt2) // 2000 * 1.5^2
+        val a0 = TunnelMonitor.calculateBackoffMs(0)
+        val a1 = TunnelMonitor.calculateBackoffMs(1)
+        val a2 = TunnelMonitor.calculateBackoffMs(2)
+        assertTrue(a1 > a0)
+        assertTrue(a2 > a1)
+        assertEquals(3000L, a1)
+        assertEquals(4500L, a2)
     }
 
     @Test
@@ -62,4 +61,37 @@ class TunnelMonitorTest {
     fun `isHandshakeStale treats zero epoch as stale`() {
         assertTrue(TunnelMonitor.isHandshakeStale(0L, 180L))
     }
+
+    // ── ReconnectRequest includes suggestedPort ───────────────────────────────
+
+    @Test
+    fun `ReconnectRequest default suggestedPort is null`() {
+        val req = TunnelMonitor.ReconnectRequest(attempt = 1, maxAttempts = 10)
+        assertNull(req.suggestedPort)
+    }
+
+    @Test
+    fun `ReconnectRequest carries explicit suggested port`() {
+        val req = TunnelMonitor.ReconnectRequest(attempt = 2, maxAttempts = 10, suggestedPort = 443)
+        assertEquals(443, req.suggestedPort)
+    }
 }
+
+    // ── Tier 1 rx-only logic ──────────────────────────────────────────────────
+
+    @Test
+    fun `isHandshakeStale — rx-only rationale comment verification`() {
+        // When a port is blocked:
+        //   tx keeps rising (client retries keepalives) — NOT a health signal
+        //   rx stops       — the real signal that replies stopped arriving
+        // This test documents the design decision: only rxBytes matters.
+        val blockedPortScenario = TunnelStats(
+            rxBytes = 1000L,   // stopped here — port blocked, no replies
+            txBytes = 99999L,  // keeps growing — client retrying, means nothing
+            lastHandshakeEpoch = (System.currentTimeMillis() / 1000) - 300  // stale
+        )
+        assertTrue(
+            TunnelMonitor.isHandshakeStale(blockedPortScenario.lastHandshakeEpoch, 180L),
+            "Stale handshake should be detected even when txBytes is rising"
+        )
+    }
