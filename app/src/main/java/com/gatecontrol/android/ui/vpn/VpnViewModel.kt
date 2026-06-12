@@ -1,521 +1,305 @@
 package com.gatecontrol.android.ui.vpn
 
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.gatecontrol.android.data.LicenseRepository
-import com.gatecontrol.android.data.SettingsRepository
-import com.gatecontrol.android.data.SetupRepository
-import com.gatecontrol.android.network.ApiClientProvider
-import com.gatecontrol.android.network.PermissionFlags
-import com.gatecontrol.android.network.TrafficStats
-import com.gatecontrol.android.network.VpnService
-import com.gatecontrol.android.service.TunnelStateHolder
-import com.gatecontrol.android.tunnel.PortRotator
-import com.gatecontrol.android.tunnel.SplitTunnelConfig
-import com.gatecontrol.android.tunnel.TunnelConfig
-import com.gatecontrol.android.tunnel.TunnelManager
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.gatecontrol.android.R
 import com.gatecontrol.android.tunnel.TunnelState
-import com.gatecontrol.android.tunnel.TunnelStats
-import dagger.hilt.android.lifecycle.HiltViewModel
+import com.gatecontrol.android.ui.components.GcOutlineButton
+import com.gatecontrol.android.ui.components.GcPrimaryButton
+import com.gatecontrol.android.ui.components.GcToggleRow
+import com.gatecontrol.android.ui.theme.GateControlTheme
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
-import timber.log.Timber
-import javax.inject.Inject
 
-@HiltViewModel
-class VpnViewModel @Inject constructor(
-    private val setupRepository: SetupRepository,
-    private val settingsRepository: SettingsRepository,
-    private val licenseRepository: LicenseRepository,
-    private val apiClientProvider: ApiClientProvider,
-    private val tunnelManager: TunnelManager,
-) : ViewModel() {
+@Composable
+fun VpnScreen(
+    viewModel: VpnViewModel = hiltViewModel(),
+    onTokenInvalid: () -> Unit = {},
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
 
-    val tunnelState: StateFlow<TunnelState> = tunnelManager.state
-
-    private val _stats = MutableStateFlow(TunnelStats())
-    val stats: StateFlow<TunnelStats> = _stats.asStateFlow()
-
-    private val _trafficUsage = MutableStateFlow<TrafficStats?>(null)
-    val trafficUsage: StateFlow<TrafficStats?> = _trafficUsage.asStateFlow()
-
-    private val _permissions = MutableStateFlow(
-        PermissionFlags(services = false, traffic = false, dns = false, rdp = false)
-    )
-    val permissions: StateFlow<PermissionFlags> = _permissions.asStateFlow()
-
-    private val _services = MutableStateFlow<List<VpnService>>(emptyList())
-    val services: StateFlow<List<VpnService>> = _services.asStateFlow()
-
-    val killSwitchEnabled: StateFlow<Boolean> = settingsRepository.getKillSwitch()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    private var monitoringStarted = false
-
-    private val _tokenInvalid = MutableStateFlow(false)
-    val tokenInvalid: StateFlow<Boolean> = _tokenInvalid.asStateFlow()
-
-    private val _peerDisabled = MutableStateFlow(false)
-    val peerDisabled: StateFlow<Boolean> = _peerDisabled.asStateFlow()
-
-    // ── 是否为纯 WireGuard 模式（无服务器） ─────────────────────────────────
-    val isWireGuardOnlyMode: Boolean
-        get() = setupRepository.isWireGuardOnlyMode()
-
-    // ── Port rotation state ───────────────────────────────────────────────────
-
-    private val _activePort = MutableStateFlow<Int?>(null)
-    val activePort: StateFlow<Int?> = _activePort.asStateFlow()
-
-    private var activePort: Int?
-        get() = _activePort.value
-        set(value) { _activePort.value = value }
-
-    private var portRotator: PortRotator? = null
-    private var lastSplitTunnelConfig: SplitTunnelConfig = SplitTunnelConfig()
-
-    // ── Token 验证（仅服务器模式）────────────────────────────────────────────
-
-    fun validateToken() {
-        // 纯 WireGuard 模式无需验证 token
-        if (setupRepository.isWireGuardOnlyMode()) return
-
-        val serverUrl = setupRepository.getServerUrl()
-        val token = setupRepository.getApiToken()
-        if (serverUrl.isEmpty() || token.isEmpty()) return
-
-        viewModelScope.launch {
-            try {
-                apiClientProvider.getClient(serverUrl).ping()
-            } catch (e: retrofit2.HttpException) {
-                if (e.code() == 401 || e.code() == 403) {
-                    Timber.w("Token invalid (HTTP ${e.code()}) — clearing config")
-                    setupRepository.clear()
-                    apiClientProvider.invalidate()
-                    _tokenInvalid.value = true
-                }
-            } catch (e: Exception) {
-                Timber.d("Token validation skipped (offline): ${e.message}")
-            }
+    // VPN permission launcher — Android requires user consent before creating a VPN tunnel
+    val vpnPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.connect()
         }
     }
 
-    // ── 监控 ──────────────────────────────────────────────────────────────────
+    val tunnelState by viewModel.tunnelState.collectAsState()
+    val stats by viewModel.stats.collectAsState()
+    val trafficUsage by viewModel.trafficUsage.collectAsState()
+    val permissions by viewModel.permissions.collectAsState()
+    val services by viewModel.services.collectAsState()
+    val killSwitchEnabled by viewModel.killSwitchEnabled.collectAsState()
+    val activePort by viewModel.activePort.collectAsState()
 
-    fun startMonitoring() {
-        if (monitoringStarted) return
-        monitoringStarted = true
+    // Bandwidth history ring buffers (60 points each)
+    val rxHistory = remember { mutableStateListOf<Long>() }
+    val txHistory = remember { mutableStateListOf<Long>() }
 
-        // 仅服务器模式需要预解析 DNS
-        if (!setupRepository.isWireGuardOnlyMode()) {
-            viewModelScope.launch {
-                val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
-                    try {
-                        val host = java.net.URI(serverUrl).host
-                        if (host != null) apiClientProvider.preResolveDns(host)
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            tunnelManager.state.collect { state ->
-                TunnelStateHolder.isConnected = state is TunnelState.Connected
-                TunnelStateHolder.serverHost = serverHost
-            }
-        }
-
-        viewModelScope.launch {
-            while (isActive) {
+    // Push speed samples every second when connected
+    LaunchedEffect(tunnelState) {
+        if (tunnelState is TunnelState.Connected) {
+            while (true) {
                 delay(1_000)
-                if (tunnelState.value is TunnelState.Connected) {
-                    tunnelManager.getStatistics()?.let { _stats.value = it }
-                }
-            }
-        }
-
-        // 对等节点检查仅在服务器模式下执行
-        if (!setupRepository.isWireGuardOnlyMode()) {
-            viewModelScope.launch {
-                while (isActive) {
-                    delay(60_000)
-                    if (tunnelState.value is TunnelState.Connected) checkPeerEnabled()
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            TunnelStateHolder.reconnectEvents.collect { req ->
-                Timber.i(
-                    "VpnViewModel: reconnect requested attempt=${req.attempt}/${req.maxAttempts}" +
-                        " suggestedPort=${req.suggestedPort}"
-                )
-                reconnectWithPort(req.suggestedPort)
+                if (rxHistory.size >= 60) rxHistory.removeAt(0)
+                if (txHistory.size >= 60) txHistory.removeAt(0)
+                rxHistory.add(stats.rxSpeed)
+                txHistory.add(stats.txSpeed)
             }
         }
     }
 
-    // ── 连接 / 断开 ───────────────────────────────────────────────────────────
+    // Start monitoring and validate token on first composition
+    LaunchedEffect(Unit) {
+        viewModel.startMonitoring()
+        viewModel.validateToken()
+    }
 
-    fun connect() {
-        viewModelScope.launch {
-            val rawConfig = setupRepository.getWireGuardConfig()
-            if (rawConfig.isEmpty()) {
-                Timber.w("VpnViewModel: no WireGuard config available")
-                return@launch
-            }
+    // Redirect to setup if token is invalid
+    val tokenInvalid by viewModel.tokenInvalid.collectAsState()
+    LaunchedEffect(tokenInvalid) {
+        if (tokenInvalid) onTokenInvalid()
+    }
 
-            val originalPort = try {
-                TunnelConfig.parse(rawConfig).getServerPort()
-            } catch (_: Exception) { 51820 }
+    // Show notification when peer is disabled on server
+    val peerDisabled by viewModel.peerDisabled.collectAsState()
+    LaunchedEffect(peerDisabled) {
+        if (peerDisabled) {
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.peer_disabled_by_server),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
 
-            portRotator = PortRotator(originalPort)
+    // Reload data when VPN state changes. Invalidate cached HTTP clients first
+    // because OkHttp's connection pool holds stale connections on the old network
+    // interface after VPN connect/disconnect, causing SocketTimeoutExceptions.
+    // Brief delay after Connected: the excluded app's network path needs a moment
+    // to stabilize after the VPN tunnel changes the routing table.
+    LaunchedEffect(tunnelState) {
+        if (tunnelState is TunnelState.Connected) {
+            delay(2_000) // wait for network stack to stabilize
+            viewModel.invalidateApiClients()
+            viewModel.loadPermissions()
+            viewModel.loadTrafficStats()
+            viewModel.loadServices()
+        } else if (tunnelState is TunnelState.Disconnected) {
+            viewModel.invalidateApiClients()
+            viewModel.loadPermissions()
+            viewModel.loadTrafficStats()
+            viewModel.loadServices()
+        }
+    }
 
-            val lastSuccessfulPort = settingsRepository.getLastSuccessfulPort().first()
-            val configToConnect = if (lastSuccessfulPort != 0 && lastSuccessfulPort != originalPort) {
-                Timber.d("VpnViewModel: trying persisted port $lastSuccessfulPort")
-                activePort = lastSuccessfulPort
-                replaceEndpointPort(rawConfig, lastSuccessfulPort)
-            } else {
-                activePort = null
-                rawConfig
-            }
-
-            // 服务器模式：拉取 split-tunnel preset；纯 WG 模式：用空配置
-            val serverUrl = setupRepository.getServerUrl()
-            val splitConfig = if (setupRepository.isWireGuardOnlyMode()) {
-                SplitTunnelConfig()
-            } else {
-                // 服务器模式：预解析 DNS
-                if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
-                    try {
-                        val host = java.net.URI(serverUrl).host
-                        if (host != null) apiClientProvider.preResolveDns(host)
-                    } catch (_: Exception) {}
-                }
-                resolveSplitTunnelConfig(serverUrl)
-            }
-            lastSplitTunnelConfig = splitConfig
-
-            // 首次连接：失败后自动轮换端口重试，最多尝试5个候选端口
-            var connected = false
-            try {
-                tunnelManager.connect(configToConnect, splitConfig)
-                connected = true
-                Timber.d("VpnViewModel: tunnel connect requested")
-                if (!setupRepository.isWireGuardOnlyMode()) {
-                    reportDeviceHostname(serverUrl)
-                }
-            } catch (e: Exception) {
-                Timber.w(e, "VpnViewModel: initial connect failed, starting port rotation")
-            }
-
-            if (!connected) {
-                val rotator = portRotator ?: return@launch
-                val maxAttempts = minOf(rotator.candidateCount, 5)
-                for (attempt in 1..maxAttempts) {
-                    val nextPort = rotator.nextPort()
-                    Timber.d("VpnViewModel: retry attempt=$attempt port=$nextPort")
-                    val retryConfig = replaceEndpointPort(rawConfig, nextPort)
-                    try {
-                        tunnelManager.connect(retryConfig, splitConfig)
-                        activePort = nextPort
-                        settingsRepository.saveSuccessfulPort(nextPort)
-                        Timber.i("VpnViewModel: connected on retry port=$nextPort")
-                        connected = true
-                        if (!setupRepository.isWireGuardOnlyMode()) {
-                            reportDeviceHostname(serverUrl)
-                        }
-                        break
-                    } catch (e: Exception) {
-                        Timber.w(e, "VpnViewModel: retry failed on port=$nextPort")
-                        delay(1_000L * attempt) // 递增等待：1s, 2s, 3s...
-                    }
-                }
-                if (!connected) {
-                    Timber.e("VpnViewModel: all initial connect attempts failed")
-                }
+    // Tick every second to update connection duration
+    var tick by remember { mutableStateOf(0L) }
+    LaunchedEffect(tunnelState) {
+        if (tunnelState is TunnelState.Connected) {
+            while (true) {
+                delay(1_000)
+                tick = System.currentTimeMillis()
             }
         }
     }
 
-    fun disconnect() {
-        viewModelScope.launch {
-            try {
-                tunnelManager.disconnect()
-                _stats.value = TunnelStats()
-                if (!setupRepository.isWireGuardOnlyMode()) {
-                    apiClientProvider.clearDnsCache()
-                }
-                resetPortState()
-                Timber.d("VpnViewModel: tunnel disconnected")
-            } catch (e: Exception) {
-                Timber.e(e, "VpnViewModel: disconnect failed")
-            }
-        }
-    }
+    val isConnected = tunnelState is TunnelState.Connected
+    val isBusy = tunnelState is TunnelState.Connecting
+        || tunnelState is TunnelState.Disconnecting
+        || tunnelState is TunnelState.Reconnecting
 
-    // ── Port rotation ─────────────────────────────────────────────────────────
+    val scrollState = rememberScrollState()
 
-    private suspend fun reconnectWithPort(port: Int?) {
-        val rawConfig = setupRepository.getWireGuardConfig()
-        if (rawConfig.isEmpty()) return
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(horizontal = 16.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
 
-        val configToUse = if (port != null) {
-            activePort = port
-            replaceEndpointPort(rawConfig, port)
+        // Connection ring
+        ConnectionRing(
+            state = tunnelState,
+            ringSize = 180.dp,
+        )
+
+        // Connect / Disconnect button
+        if (isConnected) {
+            GcOutlineButton(
+                text = stringResource(R.string.vpn_disconnect),
+                onClick = { viewModel.disconnect() },
+                modifier = Modifier.fillMaxWidth(),
+            )
         } else {
-            activePort = null
-            rawConfig
+            GcPrimaryButton(
+                text = stringResource(R.string.vpn_connect),
+                onClick = {
+                    // Check VPN permission before connecting
+                    val prepareIntent = android.net.VpnService.prepare(context)
+                    if (prepareIntent != null) {
+                        vpnPermissionLauncher.launch(prepareIntent)
+                    } else {
+                        viewModel.connect()
+                    }
+                },
+                enabled = !isBusy,
+                loading = isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
-        try {
-            tunnelManager.connect(configToUse, lastSplitTunnelConfig)
-            Timber.d("VpnViewModel: reconnected on port ${port ?: "original"}")
-            if (port != null) {
-                settingsRepository.saveSuccessfulPort(port)
-                Timber.i("VpnViewModel: persisted successful port $port")
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "VpnViewModel: reconnect failed on port $port")
-        }
-    }
-
-    internal fun replaceEndpointPort(config: String, port: Int): String =
-        config.lines().joinToString("\n") { line ->
-            val trimmed = line.trim()
-            if (trimmed.startsWith("Endpoint", ignoreCase = true) && trimmed.contains("=")) {
-                val eqIndex = line.indexOf('=')
-                val prefix = line.substring(0, eqIndex + 1)
-                val value = line.substring(eqIndex + 1).trim()
-                val hostPart = when {
-                    value.startsWith("[") -> value.substringBeforeLast(":")
-                    else -> value.substringBeforeLast(":")
-                }
-                "$prefix $hostPart:$port"
-            } else {
-                line
-            }
+        // Stats grid (only show when connected or previously connected)
+        if (isConnected || stats.rxBytes > 0 || stats.txBytes > 0) {
+            val connectedSince = (tunnelState as? TunnelState.Connected)?.connectedSince ?: 0L
+            StatsGrid(
+                stats = stats,
+                serverHost = viewModel.serverHost,
+                activePort = activePort,
+                connectedSince = connectedSince,
+                currentTimeMillis = tick,
+                locale = "en",
+            )
         }
 
-    private suspend fun resetPortState() {
-        activePort = null
-        portRotator?.reset()
-        settingsRepository.clearSuccessfulPort()
-        Timber.d("VpnViewModel: port state reset to original")
-    }
-
-    // ── 对等节点检查（仅服务器模式）──────────────────────────────────────────
-
-    private suspend fun checkPeerEnabled() {
-        try {
-            val serverUrl = setupRepository.getServerUrl()
-            if (serverUrl.isEmpty()) return
-            val peerId = setupRepository.getPeerId()
-            if (peerId <= 0) return
-            val response = apiClientProvider.getClient(serverUrl).getPeerInfo(peerId)
-            if (response.ok && !response.peer.enabled) {
-                Timber.w("Peer disabled on server (id=$peerId) — disconnecting tunnel")
-                tunnelManager.disconnect()
-                _stats.value = TunnelStats()
-                apiClientProvider.clearDnsCache()
-                resetPortState()
-                _peerDisabled.value = true
-            }
-        } catch (e: Exception) {
-            Timber.d("Peer status check failed (offline): ${e.message}")
+        // Bandwidth graph (only when connected)
+        if (isConnected) {
+            BandwidthGraph(
+                rxHistory = rxHistory.toList(),
+                txHistory = txHistory.toList(),
+            )
         }
-    }
 
-    // ── 辅助功能 ──────────────────────────────────────────────────────────────
-
-    fun toggleKillSwitch(enabled: Boolean) {
-        viewModelScope.launch {
-            settingsRepository.setKillSwitch(enabled)
-            Timber.d("VpnViewModel: kill-switch set to $enabled")
+        // Traffic usage (requires traffic permission)
+        if (permissions.traffic && trafficUsage != null) {
+            TrafficUsage(traffic = trafficUsage)
         }
-    }
 
-    fun loadTrafficStats() {
-        if (setupRepository.isWireGuardOnlyMode()) return
-        viewModelScope.launch {
-            try {
-                val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.isEmpty()) return@launch
-                val peerId = setupRepository.getPeerId()
-                if (peerId <= 0) return@launch
-                val response = apiClientProvider.getClient(serverUrl).getTraffic(peerId)
-                if (response.ok) _trafficUsage.value = response.traffic
-            } catch (e: Exception) {
-                Timber.w(e, "VpnViewModel: failed to load traffic stats")
-            }
+        // Kill-switch toggle
+        GcToggleRow(
+            icon = Icons.Default.Lock,
+            label = stringResource(R.string.vpn_kill_switch),
+            description = stringResource(R.string.vpn_kill_switch_desc),
+            checked = killSwitchEnabled,
+            onCheckedChange = { viewModel.toggleKillSwitch(it) },
+        )
+
+        // DNS leak test (requires dns permission)
+        if (permissions.dns) {
+            var dnsTestResult by remember { mutableStateOf<String?>(null) }
+            var dnsTestLoading by remember { mutableStateOf(false) }
+
+            GcOutlineButton(
+                text = if (dnsTestLoading) stringResource(R.string.dns_testing)
+                       else dnsTestResult ?: stringResource(R.string.dns_leak_test),
+                onClick = {
+                    dnsTestLoading = true
+                    viewModel.runDnsLeakTest { result ->
+                        dnsTestResult = result
+                        dnsTestLoading = false
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
+}
 
-    fun loadServices() {
-        if (setupRepository.isWireGuardOnlyMode()) return
-        viewModelScope.launch {
-            try {
-                val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.isEmpty()) return@launch
-                val response = apiClientProvider.getClient(serverUrl).getServices()
-                if (response.ok) _services.value = response.services
-            } catch (e: Exception) {
-                Timber.w(e, "VpnViewModel: failed to load services")
-            }
-        }
-    }
+@Composable
+private fun ServicesSection(
+    services: List<com.gatecontrol.android.network.VpnService>,
+) {
+    val extra = GateControlTheme.extraColors
 
-    val serverHost: String?
-        get() {
-            val config = setupRepository.getWireGuardConfig()
-            if (config.isEmpty()) return null
-            return try {
-                TunnelConfig.parse(config).getServerHost()
-            } catch (_: Exception) { null }
-        }
-
-    fun runDnsLeakTest(onResult: (String) -> Unit) {
-        if (setupRepository.isWireGuardOnlyMode()) {
-            onResult("DNS leak test not available in WireGuard-only mode")
-            return
-        }
-        viewModelScope.launch {
-            try {
-                val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.isEmpty()) { onResult("No server configured"); return@launch }
-                val response = apiClientProvider.getClient(serverUrl).dnsCheck()
-                onResult(
-                    if (response.ok) "DNS: ${response.vpnDns} (Subnet: ${response.vpnSubnet})"
-                    else "DNS check failed"
-                )
-            } catch (e: Exception) {
-                Timber.w(e, "VpnViewModel: DNS leak test failed")
-                onResult("DNS test error: ${e.localizedMessage}")
-            }
-        }
-    }
-
-    fun invalidateApiClients() = apiClientProvider.invalidate()
-
-    fun loadPermissions() {
-        if (setupRepository.isWireGuardOnlyMode()) return
-        viewModelScope.launch {
-            try {
-                val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.isEmpty()) return@launch
-                val response = apiClientProvider.getClient(serverUrl).getPermissions()
-                if (response.ok) {
-                    val flags = response.permissions
-                    _permissions.value = flags
-                    licenseRepository.updatePermissions(
-                        services = flags.services,
-                        traffic = flags.traffic,
-                        dns = flags.dns,
-                        rdp = flags.rdp,
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = stringResource(R.string.services_title),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        services.forEach { service ->
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp),
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, extra.border),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
                     )
-                }
-            } catch (e: Exception) {
-                Timber.w(e, "VpnViewModel: failed to load permissions")
-            }
-        }
-    }
-
-    // ── Split-tunnel（仅服务器模式）───────────────────────────────────────────
-
-    private suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
-        var splitTunnelConfig = SplitTunnelConfig()
-        try {
-            var adminPresetActive = false
-            if (serverUrl.isNotEmpty()) {
-                try {
-                    val client = apiClientProvider.getClient(serverUrl)
-                    val preset = client.getSplitTunnelPreset()
-                    if (preset.ok && preset.mode != "off" && preset.source != "none") {
-                        settingsRepository.setSplitTunnelMode(preset.mode)
-                        val arr = JSONArray()
-                        preset.networks.forEach {
-                            arr.put(JSONObject().put("cidr", it.cidr).put("label", it.label))
-                        }
-                        settingsRepository.setSplitTunnelNetworks(arr.toString())
-                        settingsRepository.setSplitTunnelAdminLocked(preset.locked)
-                        adminPresetActive = true
-                        val userApps = settingsRepository.getSplitTunnelAppsV2().first()
-                        splitTunnelConfig = SplitTunnelConfig(
-                            mode = preset.mode,
-                            networks = preset.networks.map { it.cidr },
-                            apps = parseSplitAppsJson(userApps),
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 12.dp),
+                    ) {
+                        Text(
+                            text = service.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = service.domain,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                } catch (e: Exception) {
-                    Timber.w(e, "Split-tunnel preset fetch failed")
+                    if (service.hasAuth) {
+                        Text(
+                            text = stringResource(R.string.services_auth_badge),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = extra.warn,
+                        )
+                    }
                 }
             }
-            if (!adminPresetActive) {
-                val mode = settingsRepository.getSplitTunnelMode().first()
-                if (mode != "off") {
-                    val networksJson = settingsRepository.getSplitTunnelNetworks().first()
-                    val appsJson = settingsRepository.getSplitTunnelAppsV2().first()
-                    splitTunnelConfig = SplitTunnelConfig(
-                        mode = mode,
-                        networks = parseSplitNetworksJsonToCidrs(networksJson),
-                        apps = parseSplitAppsJson(appsJson),
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            Timber.w(e, "Split-tunnel config load failed")
-        }
-        return splitTunnelConfig
-    }
-
-    private fun reportDeviceHostname(serverUrl: String) {
-        if (serverUrl.isEmpty() || (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://"))) {
-            return
-        }
-        viewModelScope.launch {
-            try {
-                val sanitized = com.gatecontrol.android.common.HostnameSanitizer
-                    .sanitize(android.os.Build.MODEL)
-                if (sanitized.isNullOrBlank()) return@launch
-                val response = apiClientProvider.getClient(serverUrl)
-                    .reportHostname(com.gatecontrol.android.network.HostnameReportRequest(sanitized))
-                Timber.d("Hostname report: assigned=${response.assigned} changed=${response.changed}")
-            } catch (e: Exception) {
-                Timber.d(e, "Hostname report skipped: ${e.message}")
-            }
-        }
-    }
-
-    private fun parseSplitNetworksJsonToCidrs(json: String): List<String> {
-        if (json.isBlank() || json == "[]") return emptyList()
-        return try {
-            val arr = JSONArray(json)
-            (0 until arr.length()).map { arr.getJSONObject(it).getString("cidr") }
-        } catch (e: Exception) {
-            Timber.w(e, "Failed to parse split-tunnel networks JSON")
-            emptyList()
-        }
-    }
-
-    private fun parseSplitAppsJson(json: String): List<String> {
-        if (json.isBlank() || json == "[]") return emptyList()
-        return try {
-            val arr = JSONArray(json)
-            (0 until arr.length()).map { arr.getJSONObject(it).getString("package") }
-        } catch (e: Exception) {
-            Timber.w(e, "Failed to parse split-tunnel apps JSON")
-            emptyList()
+            Spacer(Modifier.height(2.dp))
         }
     }
 }
