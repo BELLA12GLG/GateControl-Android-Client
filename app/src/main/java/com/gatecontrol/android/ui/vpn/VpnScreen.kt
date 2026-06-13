@@ -20,6 +20,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -64,6 +66,9 @@ fun VpnScreen(
     val services by viewModel.services.collectAsState()
     val killSwitchEnabled by viewModel.killSwitchEnabled.collectAsState()
     val activePort by viewModel.activePort.collectAsState()
+
+    // 手动换端口确认 Dialog
+    var showRotatePortDialog by remember { mutableStateOf(false) }
 
     // Bandwidth history ring buffers (60 points each)
     val rxHistory = remember { mutableStateListOf<Long>() }
@@ -191,6 +196,7 @@ fun VpnScreen(
                 stats = stats,
                 serverHost = viewModel.serverHost,
                 activePort = activePort,
+                onPortClick = { showRotatePortDialog = true },
                 connectedSince = connectedSince,
                 currentTimeMillis = tick,
                 locale = "en",
@@ -202,6 +208,28 @@ fun VpnScreen(
             BandwidthGraph(
                 rxHistory = rxHistory.toList(),
                 txHistory = txHistory.toList(),
+            )
+        }
+
+        // 手动换端口确认 Dialog
+        if (showRotatePortDialog) {
+            AlertDialog(
+                onDismissRequest = { showRotatePortDialog = false },
+                title = { Text(stringResource(R.string.port_rotate_title)) },
+                text  = { Text(stringResource(R.string.port_rotate_body)) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showRotatePortDialog = false
+                        viewModel.manualRotatePort()
+                    }) {
+                        Text(stringResource(R.string.port_rotate_confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRotatePortDialog = false }) {
+                        Text(stringResource(R.string.port_rotate_cancel))
+                    }
+                },
             )
         }
 
