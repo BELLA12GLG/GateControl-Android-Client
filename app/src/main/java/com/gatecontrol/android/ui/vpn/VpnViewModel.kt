@@ -156,7 +156,9 @@ class VpnViewModel @Inject constructor(
                     "VpnViewModel: reconnect requested attempt=${req.attempt}/${req.maxAttempts}" +
                         " suggestedPort=${req.suggestedPort}"
                 )
-                reconnectWithPort(req.suggestedPort)
+                // 把整个 req 传入，connect() 完成后通过 req.connectDone 通知 Monitor，
+                // 让 Monitor 在真实握手结果出来后再判断 recovered，而非盲等固定时间。
+                reconnectWithPort(req)
             }
         }
     }
@@ -263,9 +265,13 @@ class VpnViewModel @Inject constructor(
 
     // ── Port rotation ─────────────────────────────────────────────────────────
 
-    private suspend fun reconnectWithPort(port: Int?) {
+    private suspend fun reconnectWithPort(req: com.gatecontrol.android.tunnel.TunnelMonitor.ReconnectRequest) {
+        val port = req.suggestedPort
         val rawConfig = setupRepository.getWireGuardConfig()
-        if (rawConfig.isEmpty()) return
+        if (rawConfig.isEmpty()) {
+            req.connectDone.complete(false)
+            return
+        }
 
         val configToUse = if (port != null) {
             _activePort.value = port
@@ -282,8 +288,12 @@ class VpnViewModel @Inject constructor(
                 settingsRepository.saveSuccessfulPort(port)
                 Timber.i("VpnViewModel: persisted successful port $port")
             }
+            // connect() 成功返回，通知 Monitor 可以查握手了
+            req.connectDone.complete(true)
         } catch (e: Exception) {
             Timber.e(e, "VpnViewModel: reconnect failed on port $port")
+            // connect() 失败，通知 Monitor 不必再等
+            req.connectDone.complete(false)
         }
     }
 
@@ -294,15 +304,9 @@ class VpnViewModel @Inject constructor(
                 val eqIndex = line.indexOf('=')
                 val prefix = line.substring(0, eqIndex + 1)
                 val value = line.substring(eqIndex + 1).trim()
-                // IPv6 格式：[2001:db8::1]:51820 — host 部分含多个冒号，
-                // 必须保留完整的 [...] 括号，不能用 substringBeforeLast(':')。
-                // IPv4/域名格式：1.2.3.4:51820 或 example.com:51820 — 最后一个冒号前为 host。
-                val hostPart = if (value.startsWith("[")) {
-                    val closeBracket = value.indexOf(']')
-                    if (closeBracket != -1) value.substring(0, closeBracket + 1)  // 保留 [::1]
-                    else value.substringBeforeLast(":")
-                } else {
-                    value.substringBeforeLast(":")
+                val hostPart = when {
+                    value.startsWith("[") -> value.substringBeforeLast(":")
+                    else -> value.substringBeforeLast(":")
                 }
                 "$prefix $hostPart:$port"
             } else {
