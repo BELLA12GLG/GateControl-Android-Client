@@ -12,11 +12,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Route
@@ -49,7 +49,6 @@ import com.gatecontrol.android.ui.theme.IosTileOrange
 import com.gatecontrol.android.ui.theme.IosTilePink
 import com.gatecontrol.android.ui.theme.IosTilePurple
 import com.gatecontrol.android.ui.theme.IosTileRed
-import com.gatecontrol.android.ui.theme.IosTileTeal
 import com.gatecontrol.android.ui.theme.IosTileYellow
 
 /**
@@ -72,6 +71,7 @@ fun SettingsScreen(
     onNavigateToLogs: () -> Unit,
     onNavigateToQrScanner: () -> Unit,
     onNavigateToSplitTunnel: () -> Unit,
+    onNavigateToNetwork: () -> Unit,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -129,14 +129,6 @@ fun SettingsScreen(
                 onClick = { showAccountSheet = true },
             )
             IosNavigationRow(
-                title = stringResource(R.string.settings_api_token),
-                icon = Icons.Filled.Key,
-                iconBg = IosTileTeal,
-                trailingText = if (uiState.apiToken.isBlank()) "—" else "••••••••",
-                showDivider = true,
-                onClick = { showAccountSheet = true },
-            )
-            IosNavigationRow(
                 title = stringResource(R.string.settings_import_qr),
                 icon = Icons.Filled.QrCodeScanner,
                 iconBg = IosTilePurple,
@@ -173,7 +165,20 @@ fun SettingsScreen(
                     "include" -> stringResource(R.string.split_tunnel_include_short)
                     else -> stringResource(R.string.settings_off)
                 },
+                showDivider = true,
                 onClick = onNavigateToSplitTunnel,
+            )
+            IosNavigationRow(
+                title = stringResource(R.string.network_settings_title),
+                icon = Icons.Filled.Public,
+                iconBg = IosTileBlue,
+                trailingText = when (uiState.ipProtocol) {
+                    "ipv4_only" -> stringResource(R.string.ip_protocol_ipv4_only_short)
+                    "ipv6_only" -> stringResource(R.string.ip_protocol_ipv6_only_short)
+                    "ipv6_preferred" -> stringResource(R.string.ip_protocol_ipv6_preferred_short)
+                    else -> stringResource(R.string.ip_protocol_auto_short)
+                },
+                onClick = onNavigateToNetwork,
             )
         }
 
