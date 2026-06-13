@@ -61,6 +61,16 @@ fun NetworkPresetsSection(
         }, enabled = !adminLocked)
         Text(stringResource(R.string.split_tunnel_private_nets), style = MaterialTheme.typography.bodyMedium)
     }
+    // Hint: 10.0.0.0/8 is intentionally omitted from this preset because it
+    // overlaps with the WireGuard VPN gateway subnet (typically 10.8.0.0/24).
+    // Users on 10.x networks should add their specific subnet (e.g. 10.0.1.0/24)
+    // as a custom network instead of blanket-excluding the whole /8.
+    Text(
+        stringResource(R.string.split_tunnel_private_nets_hint),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 48.dp, bottom = 4.dp),
+    )
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = hasLinkLocal, onCheckedChange = { checked ->
