@@ -345,6 +345,29 @@ class VpnViewModel @Inject constructor(
 
     // ── 辅助功能 ──────────────────────────────────────────────────────────────
 
+    /**
+     * 用户手动触发端口轮换：取下一个候选端口立即重连，无需等待 TunnelMonitor 检测到握手超时。
+     * 仅在已连接状态下有效；未连接或 portRotator 未初始化时静默忽略。
+     */
+    fun manualRotatePort() {
+        val rotator = portRotator ?: return
+        viewModelScope.launch {
+            val nextPort = rotator.nextPort()
+            Timber.i("VpnViewModel: manual port rotate → $nextPort")
+            val rawConfig = setupRepository.getWireGuardConfig()
+            if (rawConfig.isEmpty()) return@launch
+            val configToUse = replaceEndpointPort(rawConfig, nextPort)
+            try {
+                tunnelManager.connect(configToUse, lastSplitTunnelConfig)
+                _activePort.value = nextPort
+                settingsRepository.saveSuccessfulPort(nextPort)
+                Timber.i("VpnViewModel: manual rotate connected on port=$nextPort")
+            } catch (e: Exception) {
+                Timber.e(e, "VpnViewModel: manual rotate failed on port=$nextPort")
+            }
+        }
+    }
+
     fun toggleKillSwitch(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepository.setKillSwitch(enabled)
