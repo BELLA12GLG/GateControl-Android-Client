@@ -215,8 +215,12 @@
 
     <!-- 后加 -->
     <string name="vpn_port">Port</string>
-    <string name="vpn_permission_required_title">VPN-Berechtigung erforderlich</string>
-    <string name="vpn_permission_required_body">Bitte öffnen Sie GateControl, um die VPN-Berechtigung erneut zu erteilen und den automatischen Start beim Hochfahren zu aktivieren.</string>
+    <string name="port_rotate_title">Switch Port?</string>
+    <string name="port_rotate_body">Force an immediate port rotation to bypass firewall or QoS restrictions. The tunnel will briefly reconnect.</string>
+    <string name="port_rotate_confirm">Rotate</string>
+    <string name="port_rotate_cancel">Cancel</string>
+    <string name="vpn_permission_required_title">VPN Permission Required</string>
+    <string name="vpn_permission_required_body">Please open GateControl to re-grant VPN permissions to enable auto-start at boot.</string>
 
 
 
