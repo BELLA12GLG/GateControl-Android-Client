@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.53] - 2026-06-13
+
+### Changes
+- 更新 build.gradle.kts
+
+---
+
 ## [1.6.51] - 2026-06-13
 
 ### Changes
