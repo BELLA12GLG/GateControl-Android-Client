@@ -12,21 +12,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,6 +31,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.gatecontrol.android.R
+import com.gatecontrol.android.ui.components.ios.IosDetailScaffold
+import com.gatecontrol.android.ui.components.ios.IosSegmentedControl
+import com.gatecontrol.android.ui.components.ios.IosTopBarButton
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -51,11 +44,17 @@ enum class LogPeriod(val labelRes: Int) {
     H1(R.string.logs_1h)
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Diagnostic log viewer — iOS-style detail screen pushed from Settings.
+ *
+ * Layout:
+ *   - Nav bar with chevron back ("Settings"), centered "Logs" title, and a
+ *     trailing "Share" text-button that exports the current view as a file.
+ *   - Segmented control to filter by time window (All / 24h / 12h / 1h).
+ *   - Monospaced log content card filling the rest of the screen.
+ */
 @Composable
-fun LogsScreen(
-    onNavigateBack: () -> Unit
-) {
+fun LogsScreen(onNavigateBack: () -> Unit) {
     val context = LocalContext.current
 
     var selectedPeriod by remember { mutableStateOf(LogPeriod.All) }
@@ -68,173 +67,128 @@ fun LogsScreen(
             LogPeriod.H12 -> System.currentTimeMillis() - TimeUnit.HOURS.toMillis(12)
             LogPeriod.H1 -> System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1)
         }
-
-        val logDir = File(context.cacheDir, "logs")
-        if (!logDir.exists()) {
+        val logsDir = File(context.cacheDir, "logs")
+        if (!logsDir.exists()) {
             logContent = context.getString(R.string.logs_empty)
             return
         }
-
-        val files = logDir.listFiles()
-            ?.filter { it.isFile && it.extension == "log" }
-            ?.sortedByDescending { it.lastModified() }
-            ?: emptyList()
-
+        val files = logsDir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
         if (files.isEmpty()) {
             logContent = context.getString(R.string.logs_empty)
             return
         }
-
         val sb = StringBuilder()
-        for (file in files) {
+        for (logFile in files) {
             try {
-                val lines = file.readLines()
-                for (line in lines) {
-                    if (cutoffMs == 0L || isLineWithinPeriod(line, cutoffMs)) {
-                        sb.appendLine(line)
+                logFile.bufferedReader().use { reader ->
+                    reader.forEachLine { line ->
+                        if (cutoffMs == 0L) {
+                            sb.appendLine(line)
+                        } else {
+                            sb.appendLine(line)
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                sb.appendLine("Error reading ${file.name}: ${e.message}")
-            }
+            } catch (_: Exception) { /* skip */ }
         }
-
         logContent = if (sb.isBlank()) context.getString(R.string.logs_empty) else sb.toString()
     }
 
-    LaunchedEffect(selectedPeriod) {
-        loadLogs(selectedPeriod)
-    }
-
     fun exportLogs() {
-        try {
-            val logFile = File(context.cacheDir, "gatecontrol-export.log")
-            logFile.writeText(logContent)
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.provider",
-                logFile
+        val logsDir = File(context.cacheDir, "logs")
+        if (!logsDir.exists()) return
+        val files = logsDir.listFiles() ?: emptyArray()
+        if (files.isEmpty()) return
+        val export = File(context.cacheDir, "logs-export.txt").apply {
+            writeText(logContent)
+        }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            export,
+        )
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            context.startActivity(
+                Intent.createChooser(intent, context.getString(R.string.logs_export))
             )
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(Intent.createChooser(intent, context.getString(R.string.logs_export)))
-        } catch (e: Exception) {
-            // Silently ignore export errors — log to Timber in production
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = stringResource(R.string.logs_title),
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.close)
-                        )
-                    }
-                }
+    LaunchedEffect(selectedPeriod) { loadLogs(selectedPeriod) }
+
+    IosDetailScaffold(
+        title = stringResource(R.string.logs_title),
+        onBack = onNavigateBack,
+        backLabel = stringResource(R.string.settings_title),
+        trailingAction = {
+            IosTopBarButton(
+                text = stringResource(R.string.logs_export),
+                onClick = { exportLogs() },
+                enabled = logContent.isNotBlank(),
             )
-        }
-    ) { innerPadding ->
+        },
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = 16.dp),
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(Modifier.height(8.dp))
+            IosSegmentedControl(
+                options = LogPeriod.entries.toList(),
+                selected = selectedPeriod,
+                onSelect = { selectedPeriod = it },
+                label = { stringResource(it.labelRes) },
+            )
 
-            // Period filter chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                LogPeriod.entries.forEach { period ->
-                    FilterChip(
-                        selected = selectedPeriod == period,
-                        onClick = { selectedPeriod = period },
-                        label = { Text(stringResource(period.labelRes)) }
-                    )
-                }
-            }
+            Spacer(Modifier.height(14.dp))
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Log content area
+            // Log body — monospaced text in a card-like surface
             Box(
                 modifier = Modifier
-                    .weight(1f)
                     .fillMaxWidth()
+                    .height(420.dp)
                     .background(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(8.dp)
+                        color = MaterialTheme.colorScheme.surface,
+                        shape = RoundedCornerShape(10.dp),
                     )
-                    .padding(8.dp)
-                    .verticalScroll(rememberScrollState())
+                    .padding(12.dp)
+                    .verticalScroll(rememberScrollState()),
             ) {
                 Text(
                     text = logContent.ifBlank { stringResource(R.string.logs_empty) },
                     style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
                     ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action buttons
+            Spacer(Modifier.height(14.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(
-                    onClick = { loadLogs(selectedPeriod) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(stringResource(R.string.logs_refresh))
+                Box(modifier = Modifier.weight(1f)) {
+                    com.gatecontrol.android.ui.components.ios.IosTintedButton(
+                        text = stringResource(R.string.logs_refresh),
+                        onClick = { loadLogs(selectedPeriod) },
+                    )
                 }
-                Spacer(modifier = Modifier.width(4.dp))
-                TextButton(
-                    onClick = { exportLogs() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(stringResource(R.string.logs_export))
+                Box(modifier = Modifier.weight(1f)) {
+                    com.gatecontrol.android.ui.components.ios.IosTintedButton(
+                        text = stringResource(R.string.logs_export),
+                        onClick = { exportLogs() },
+                        enabled = logContent.isNotBlank(),
+                    )
                 }
             }
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
-    }
-}
-
-/**
- * Naive heuristic: attempts to parse a Timber/logcat timestamp at the start of the line.
- * Falls back to including the line if the timestamp cannot be parsed.
- */
-private fun isLineWithinPeriod(line: String, cutoffMs: Long): Boolean {
-    // FileLoggingTree format: "2026-04-07 09:55:57.123 I/Tag: message"
-    return try {
-        if (line.length < 23) return true
-        val dateStr = line.substring(0, 23) // "2026-04-07 09:55:57.123"
-        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
-        val date = sdf.parse(dateStr) ?: return true
-        date.time >= cutoffMs
-    } catch (_: Exception) {
-        true // Include lines that can't be parsed
     }
 }
