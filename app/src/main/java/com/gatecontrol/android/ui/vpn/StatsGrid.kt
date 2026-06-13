@@ -1,5 +1,6 @@
 package com.gatecontrol.android.ui.vpn
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,6 +19,7 @@ fun StatsGrid(
     stats: TunnelStats,
     serverHost: String?,
     activePort: Int?,
+    onPortClick: (() -> Unit)? = null,
     connectedSince: Long,
     currentTimeMillis: Long = System.currentTimeMillis(),
     locale: String,
@@ -63,7 +65,12 @@ fun StatsGrid(
             GcStatCard(
                 label = stringResource(R.string.vpn_port),
                 value = activePort?.toString() ?: "—",
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .then(
+                        if (onPortClick != null) Modifier.clickable(onClick = onPortClick)
+                        else Modifier
+                    ),
             )
         }
         Row(
