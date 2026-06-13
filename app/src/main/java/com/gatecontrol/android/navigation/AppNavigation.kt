@@ -21,6 +21,7 @@ import com.gatecontrol.android.ui.components.ios.IosTabBar
 import com.gatecontrol.android.ui.rdp.RdpScreen
 import com.gatecontrol.android.ui.services.ServicesScreen
 import com.gatecontrol.android.ui.settings.LogsScreen
+import com.gatecontrol.android.ui.settings.NetworkSettingsScreen
 import com.gatecontrol.android.ui.settings.SettingsScreen
 import com.gatecontrol.android.ui.settings.SplitTunnelScreen
 import com.gatecontrol.android.ui.setup.QrScannerScreen
@@ -150,6 +151,7 @@ fun AppNavigation(
                     onNavigateToLogs = { navController.navigate(Screen.Logs.route) },
                     onNavigateToQrScanner = { navController.navigate(Screen.QrScanner.route) },
                     onNavigateToSplitTunnel = { navController.navigate(Screen.SplitTunnel.route) },
+                    onNavigateToNetwork = { navController.navigate(Screen.Network.route) },
                 )
             }
 
@@ -159,6 +161,10 @@ fun AppNavigation(
 
             composable(Screen.SplitTunnel.route) {
                 SplitTunnelScreen(onNavigateBack = { navController.popBackStack() })
+            }
+
+            composable(Screen.Network.route) {
+                NetworkSettingsScreen(onNavigateBack = { navController.popBackStack() })
             }
         }
     }
