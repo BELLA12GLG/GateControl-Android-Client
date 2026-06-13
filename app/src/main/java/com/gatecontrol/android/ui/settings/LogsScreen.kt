@@ -95,27 +95,42 @@ fun LogsScreen(onNavigateBack: () -> Unit) {
     }
 
     fun exportLogs() {
-        val logsDir = File(context.cacheDir, "logs")
-        if (!logsDir.exists()) return
-        val files = logsDir.listFiles() ?: emptyArray()
-        if (files.isEmpty()) return
-        val export = File(context.cacheDir, "logs-export.txt").apply {
-            writeText(logContent)
-        }
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            export,
-        )
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        runCatching {
+        try {
+            val logsDir = File(context.cacheDir, "logs")
+            if (!logsDir.exists()) return
+            val files = logsDir.listFiles() ?: emptyArray()
+            if (files.isEmpty()) return
+            val export = File(context.cacheDir, "logs-export.txt").apply {
+                writeText(logContent)
+            }
+            // v6.5 fix: authority MUST match what's declared in AndroidManifest.xml
+            // (which uses `${applicationId}.provider`, NOT `.fileprovider`).
+            // With the wrong authority, FileProvider.getUriForFile throws
+            // IllegalArgumentException and the app crashes when the user taps
+            // "Export logs".
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.provider",
+                export,
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
             context.startActivity(
                 Intent.createChooser(intent, context.getString(R.string.logs_export))
             )
+        } catch (e: Exception) {
+            // Last-resort guard so the App can't crash from a file-share
+            // failure. The toast tells the user something went wrong without
+            // exposing implementation details.
+            timber.log.Timber.e(e, "Log export failed")
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.logs_export_failed),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
