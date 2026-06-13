@@ -271,4 +271,32 @@
     <string name="split_tunnel_cidr_invalid">Kein gültiger CIDR (z. B. 10.0.1.0/24)</string>
     <string name="split_tunnel_cidr_duplicate">Bereits in der Liste</string>
     <string name="split_tunnel_label_hint">z. B. „Heimnetz“</string>
+    <!-- Netzwerk-Einstellungen (v4.7) -->
+    <string name="network_settings_title">Netzwerk</string>
+    <string name="ip_protocol_header">IP-Protokoll</string>
+    <string name="ip_protocol_auto">Automatisch (IPv4 bevorzugt)</string>
+    <string name="ip_protocol_auto_short">Auto</string>
+    <string name="ip_protocol_auto_desc">Verbinde über IPv4 oder IPv6, bevorzuge IPv4, wenn beide verfügbar sind.</string>
+    <string name="ip_protocol_ipv6_preferred">IPv6 bevorzugen</string>
+    <string name="ip_protocol_ipv6_preferred_short">IPv6 zuerst</string>
+    <string name="ip_protocol_ipv6_preferred_desc">Nutze IPv6, wenn der Server darüber erreichbar ist, sonst IPv4.</string>
+    <string name="ip_protocol_ipv4_only">Nur IPv4</string>
+    <string name="ip_protocol_ipv4_only_short">IPv4</string>
+    <string name="ip_protocol_ipv4_only_desc">IPv6 wird komplett abgelehnt. Sowohl Server-Endpunkt als auch Tunnel verwenden ausschließlich IPv4.</string>
+    <string name="ip_protocol_ipv6_only">Nur IPv6</string>
+    <string name="ip_protocol_ipv6_only_short">IPv6</string>
+    <string name="ip_protocol_ipv6_only_desc">IPv4 wird komplett abgelehnt. Sowohl Server-Endpunkt als auch Tunnel verwenden ausschließlich IPv6.</string>
+    <string name="dns_header">DNS-Server</string>
+    <string name="dns_footer">Beide Felder leer lassen, um die DNS-Server aus der VPN-Konfiguration (oder System-DNS) zu verwenden.</string>
+    <string name="dns_primary_label">Primärer DNS</string>
+    <string name="dns_secondary_label">Sekundärer DNS</string>
+    <string name="dns_invalid">Keine gültige IPv4- oder IPv6-Adresse</string>
+    <string name="dns_presets_header">Vorlagen</string>
+    <string name="dns_preset_system">Systemstandard</string>
+    <!-- App-Auswahl-Verbesserungen -->
+    <string name="split_tunnel_pick_apps">Apps auswählen</string>
+    <string name="split_tunnel_selected_header">Ausgewählt (%1$d)</string>
+    <string name="split_tunnel_all_apps_header">Alle Apps (%1$d)</string>
+    <string name="split_tunnel_clear_all">Alle entfernen</string>
+    <string name="split_tunnel_no_matches">Keine Treffer für „%1$s“</string>
 </resources>
