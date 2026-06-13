@@ -7,7 +7,6 @@ import com.gatecontrol.android.data.SettingsRepository
 import com.gatecontrol.android.network.ApiClient
 import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.network.PingResponse
-import com.gatecontrol.android.network.UpdateCheckResponse
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -66,8 +65,11 @@ class SettingsViewModelTest {
             every { invalidate() } returns Unit
         }
         licenseRepository = mockk()
+        val dnsResolver = mockk<com.gatecontrol.android.network.DnsResolver>(relaxed = true)
 
-        viewModel = SettingsViewModel(setupRepository, settingsRepository, apiClientProvider, licenseRepository)
+        viewModel = SettingsViewModel(
+            setupRepository, settingsRepository, apiClientProvider, licenseRepository, dnsResolver,
+        )
     }
 
     @AfterEach
@@ -190,39 +192,6 @@ class SettingsViewModelTest {
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertTrue(viewModel.uiState.value.splitTunnelRoutes.isBlank())
-    }
-
-    @Test
-    fun `checkForUpdate sets updateInfo on success`() = runTest {
-        val updateResponse = UpdateCheckResponse(
-            ok = true,
-            available = true,
-            version = "2.0.0",
-            downloadUrl = "https://example.com/release",
-            fileName = "gatecontrol.apk",
-            fileSize = 10_000_000L,
-            releaseNotes = "New features"
-        )
-        coEvery { apiClient.checkUpdate(any(), any(), any()) } returns updateResponse
-
-        viewModel.checkForUpdate("1.0.0")
-        testDispatcher.scheduler.advanceUntilIdle()
-
-        val state = viewModel.uiState.value
-        assertNotNull(state.updateInfo)
-        assertEquals("2.0.0", state.updateInfo?.version)
-        assertTrue(state.updateInfo?.available == true)
-    }
-
-    @Test
-    fun `checkForUpdate sets error on exception`() = runTest {
-        coEvery { apiClient.checkUpdate(any(), any(), any()) } throws RuntimeException("Network error")
-
-        viewModel.checkForUpdate("1.0.0")
-        testDispatcher.scheduler.advanceUntilIdle()
-
-        assertNull(viewModel.uiState.value.updateInfo)
-        assertNotNull(viewModel.uiState.value.error)
     }
 
     @Test
