@@ -147,7 +147,20 @@ class TunnelConnector @Inject constructor(
         } catch (e: Exception) {
             Timber.w(e, "Split-tunnel config load failed")
         }
-        return splitTunnelConfig
+        // v6.5: layer static hosts (app-layer DNS feature) onto the tunnel
+        // config. The TunnelManager uses these to override Endpoint resolution
+        // — useful when system DNS is blocked / poisoned. Reads the same
+        // JSON-encoded map that the OkHttp-layer DnsResolver consumes.
+        val staticHosts = try {
+            com.gatecontrol.android.network.DnsResolver
+                .parseStaticHostsJsonAsStringMap(
+                    settingsRepository.getStaticHostsJson().first()
+                )
+        } catch (e: Exception) {
+            Timber.w(e, "Static hosts load failed")
+            emptyMap()
+        }
+        return splitTunnelConfig.copy(staticHosts = staticHosts)
     }
 
     /**
