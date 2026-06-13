@@ -34,4 +34,16 @@ data class SplitTunnelConfig(
      * filter them per [ipProtocol] before applying.
      */
     val dnsServers: List<String> = emptyList(),
+    /**
+     * Static hosts overrides (host → IP). Consulted by TunnelManager during
+     * Endpoint resolution. v6.5: lets the user pin the server's hostname to a
+     * specific IP so the tunnel comes up even when system DNS is blocked /
+     * poisoned. Hosts are stored lower-cased; comparison is case-insensitive.
+     *
+     * NOTE: this only affects the tunnel layer's resolution of the WireGuard
+     * Endpoint string. Traffic flowing THROUGH the tunnel after it's up is
+     * still resolved by the system / tunnel DNS server — Android doesn't let
+     * an unprivileged app override that.
+     */
+    val staticHosts: Map<String, String> = emptyMap(),
 )
