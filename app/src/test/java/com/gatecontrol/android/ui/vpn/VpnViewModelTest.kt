@@ -9,6 +9,8 @@ import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.network.PermissionFlags
 import com.gatecontrol.android.network.PermissionsResponse
 import com.gatecontrol.android.network.SplitTunnelPresetResponse
+import com.gatecontrol.android.service.TunnelConnector
+import com.gatecontrol.android.tunnel.SplitTunnelConfig
 import com.gatecontrol.android.tunnel.TunnelManager
 import com.gatecontrol.android.tunnel.TunnelState
 import io.mockk.coEvery
@@ -40,6 +42,7 @@ class VpnViewModelTest {
     private lateinit var apiClientProvider: ApiClientProvider
     private lateinit var apiClient: ApiClient
     private lateinit var tunnelManager: TunnelManager
+    private lateinit var tunnelConnector: TunnelConnector
     private lateinit var viewModel: VpnViewModel
 
     private val SAMPLE_WG_CONFIG =
@@ -55,6 +58,7 @@ class VpnViewModelTest {
         apiClientProvider = mockk(relaxed = true)
         apiClient = mockk(relaxed = true)
         tunnelManager = mockk(relaxed = true)
+        tunnelConnector = mockk(relaxed = true)
 
         every { settingsRepository.getKillSwitch() } returns flowOf(false)
         every { settingsRepository.getSplitTunnelEnabled() } returns flowOf(false)
@@ -72,6 +76,8 @@ class VpnViewModelTest {
         every { apiClientProvider.getClient(any()) } returns apiClient
         every { tunnelManager.state } returns MutableStateFlow(TunnelState.Disconnected)
         every { tunnelManager.stats } returns MutableStateFlow(com.gatecontrol.android.tunnel.TunnelStats())
+        // Default: split-tunnel disabled. Individual tests can override.
+        coEvery { tunnelConnector.resolveSplitTunnelConfig(any()) } returns SplitTunnelConfig()
 
         viewModel = VpnViewModel(
             setupRepository = setupRepository,
@@ -79,6 +85,7 @@ class VpnViewModelTest {
             licenseRepository = licenseRepository,
             apiClientProvider = apiClientProvider,
             tunnelManager = tunnelManager,
+            tunnelConnector = tunnelConnector,
         )
     }
 
@@ -150,6 +157,35 @@ class VpnViewModelTest {
             tunnelManager.connect(
                 match { it.contains(":51820") },
                 any<com.gatecontrol.android.tunnel.SplitTunnelConfig>(),
+            )
+        }
+    }
+
+    // Regression test for the "split-tunnel silently ignored" bug:
+    // VpnViewModel must obtain its SplitTunnelConfig from TunnelConnector
+    // (the single authoritative source), not by constructing an empty one
+    // or duplicating the parsing logic.
+    @Test
+    fun `connect uses split-tunnel config resolved by TunnelConnector`() = runTest {
+        every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
+        val resolved = SplitTunnelConfig(
+            mode = "exclude",
+            networks = listOf("192.168.1.0/24"),
+            apps = listOf("com.example.app"),
+        )
+        coEvery { tunnelConnector.resolveSplitTunnelConfig(any()) } returns resolved
+
+        viewModel.connect()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        coVerify {
+            tunnelManager.connect(
+                any(),
+                match<SplitTunnelConfig> {
+                    it.mode == "exclude" &&
+                        it.networks == listOf("192.168.1.0/24") &&
+                        it.apps == listOf("com.example.app")
+                },
             )
         }
     }
