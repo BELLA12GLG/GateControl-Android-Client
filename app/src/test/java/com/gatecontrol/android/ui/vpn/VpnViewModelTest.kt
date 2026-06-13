@@ -9,6 +9,7 @@ import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.network.PermissionFlags
 import com.gatecontrol.android.network.PermissionsResponse
 import com.gatecontrol.android.network.SplitTunnelPresetResponse
+import com.gatecontrol.android.service.PortRotationCoordinator
 import com.gatecontrol.android.service.TunnelConnector
 import com.gatecontrol.android.tunnel.SplitTunnelConfig
 import com.gatecontrol.android.tunnel.TunnelManager
@@ -43,6 +44,7 @@ class VpnViewModelTest {
     private lateinit var apiClient: ApiClient
     private lateinit var tunnelManager: TunnelManager
     private lateinit var tunnelConnector: TunnelConnector
+    private lateinit var portRotationCoordinator: PortRotationCoordinator
     private lateinit var viewModel: VpnViewModel
 
     private val SAMPLE_WG_CONFIG =
@@ -79,6 +81,14 @@ class VpnViewModelTest {
         // Default: split-tunnel disabled. Individual tests can override.
         coEvery { tunnelConnector.resolveSplitTunnelConfig(any()) } returns SplitTunnelConfig()
 
+        // v6: PortRotationCoordinator stub. VpnViewModel reads activePort/
+        // currentAttempt as part of its public API surface (UI binds to them),
+        // so they must be valid StateFlows even when the test doesn't care.
+        portRotationCoordinator = mockk(relaxed = true)
+        every { portRotationCoordinator.activePort } returns MutableStateFlow<Int?>(null)
+        every { portRotationCoordinator.currentAttempt } returns
+            MutableStateFlow<PortRotationCoordinator.AttemptInfo?>(null)
+
         viewModel = VpnViewModel(
             setupRepository = setupRepository,
             settingsRepository = settingsRepository,
@@ -86,6 +96,7 @@ class VpnViewModelTest {
             apiClientProvider = apiClientProvider,
             tunnelManager = tunnelManager,
             tunnelConnector = tunnelConnector,
+            portRotationCoordinator = portRotationCoordinator,
         )
     }
 
@@ -107,13 +118,22 @@ class VpnViewModelTest {
     // ── connect ───────────────────────────────────────────────────────────────
 
     @Test
-    fun `connect calls tunnelManager with config`() = runTest {
+    fun `connect delegates to PortRotationCoordinator`() = runTest {
         every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
+        coEvery { portRotationCoordinator.connectWithRetry(any(), any(), any(), any()) } returns
+            PortRotationCoordinator.Outcome.Connected(51820)
 
         viewModel.connect()
         testDispatcher.scheduler.advanceUntilIdle()
 
-        coVerify { tunnelManager.connect(any(), any<com.gatecontrol.android.tunnel.SplitTunnelConfig>()) }
+        coVerify {
+            portRotationCoordinator.connectWithRetry(
+                rawConfig = match { it.contains("Endpoint") },
+                splitConfig = any(),
+                maxAttempts = any(),
+                preferredFirstPort = any(),
+            )
+        }
     }
 
     @Test
@@ -124,39 +144,46 @@ class VpnViewModelTest {
         testDispatcher.scheduler.advanceUntilIdle()
 
         coVerify(exactly = 0) {
-            tunnelManager.connect(any(), any<com.gatecontrol.android.tunnel.SplitTunnelConfig>())
+            portRotationCoordinator.connectWithRetry(any(), any(), any(), any())
         }
     }
 
     @Test
-    fun `connect uses persisted successful port when available`() = runTest {
+    fun `connect passes persisted port to coordinator as preferredFirstPort`() = runTest {
         every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
         every { settingsRepository.getLastSuccessfulPort() } returns flowOf(443)
+        coEvery { portRotationCoordinator.connectWithRetry(any(), any(), any(), any()) } returns
+            PortRotationCoordinator.Outcome.Connected(443)
 
         viewModel.connect()
         testDispatcher.scheduler.advanceUntilIdle()
 
-        // tunnelManager.connect should have been called with config containing :443
         coVerify {
-            tunnelManager.connect(
-                match { it.contains(":443") },
-                any<com.gatecontrol.android.tunnel.SplitTunnelConfig>(),
+            portRotationCoordinator.connectWithRetry(
+                rawConfig = any(),
+                splitConfig = any(),
+                maxAttempts = any(),
+                preferredFirstPort = 443,
             )
         }
     }
 
     @Test
-    fun `connect uses original port when no persisted port`() = runTest {
+    fun `connect passes null preferredFirstPort when no persisted port`() = runTest {
         every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
         every { settingsRepository.getLastSuccessfulPort() } returns flowOf(0)
+        coEvery { portRotationCoordinator.connectWithRetry(any(), any(), any(), any()) } returns
+            PortRotationCoordinator.Outcome.Connected(51820)
 
         viewModel.connect()
         testDispatcher.scheduler.advanceUntilIdle()
 
         coVerify {
-            tunnelManager.connect(
-                match { it.contains(":51820") },
-                any<com.gatecontrol.android.tunnel.SplitTunnelConfig>(),
+            portRotationCoordinator.connectWithRetry(
+                rawConfig = any(),
+                splitConfig = any(),
+                maxAttempts = any(),
+                preferredFirstPort = null,
             )
         }
     }
@@ -164,7 +191,9 @@ class VpnViewModelTest {
     // Regression test for the "split-tunnel silently ignored" bug:
     // VpnViewModel must obtain its SplitTunnelConfig from TunnelConnector
     // (the single authoritative source), not by constructing an empty one
-    // or duplicating the parsing logic.
+    // or duplicating the parsing logic. With the v6 coordinator refactor,
+    // we verify the resolved SplitTunnelConfig is the one passed to the
+    // coordinator (which in turn passes it to TunnelManager).
     @Test
     fun `connect uses split-tunnel config resolved by TunnelConnector`() = runTest {
         every { setupRepository.getWireGuardConfig() } returns SAMPLE_WG_CONFIG
@@ -174,18 +203,22 @@ class VpnViewModelTest {
             apps = listOf("com.example.app"),
         )
         coEvery { tunnelConnector.resolveSplitTunnelConfig(any()) } returns resolved
+        coEvery { portRotationCoordinator.connectWithRetry(any(), any(), any(), any()) } returns
+            PortRotationCoordinator.Outcome.Connected(51820)
 
         viewModel.connect()
         testDispatcher.scheduler.advanceUntilIdle()
 
         coVerify {
-            tunnelManager.connect(
-                any(),
-                match<SplitTunnelConfig> {
+            portRotationCoordinator.connectWithRetry(
+                rawConfig = any(),
+                splitConfig = match<SplitTunnelConfig> {
                     it.mode == "exclude" &&
                         it.networks == listOf("192.168.1.0/24") &&
                         it.apps == listOf("com.example.app")
                 },
+                maxAttempts = any(),
+                preferredFirstPort = any(),
             )
         }
     }
@@ -201,46 +234,14 @@ class VpnViewModelTest {
     }
 
     @Test
-    fun `disconnect clears successful port`() = runTest {
+    fun `disconnect resets coordinator's persisted port`() = runTest {
+        // v6: clearing the persisted port now goes through the coordinator
+        // (which owns activePort state). The coordinator's resetPersistedPort()
+        // is what calls settingsRepository.clearSuccessfulPort() internally.
         viewModel.disconnect()
         testDispatcher.scheduler.advanceUntilIdle()
 
-        coVerify { settingsRepository.clearSuccessfulPort() }
-    }
-
-    // ── replaceEndpointPort ───────────────────────────────────────────────────
-
-    @Test
-    fun `replaceEndpointPort swaps IPv4 endpoint port`() {
-        val config = "Endpoint = 1.2.3.4:51820"
-        val result = viewModel.replaceEndpointPort(config, 443)
-        assertTrue(result.contains("1.2.3.4:443"), "Expected '1.2.3.4:443' in result: $result")
-        assertFalse(result.contains(":51820"), "Old port should be gone")
-    }
-
-    @Test
-    fun `replaceEndpointPort swaps IPv6 bracketed endpoint port`() {
-        val config = "Endpoint = [2001:db8::1]:51820"
-        val result = viewModel.replaceEndpointPort(config, 443)
-        assertTrue(result.contains("[2001:db8::1]:443"), "Expected IPv6 endpoint with new port")
-        assertFalse(result.contains(":51820"), "Old port should be gone")
-    }
-
-    @Test
-    fun `replaceEndpointPort leaves non-Endpoint lines unchanged`() {
-        val config = "PrivateKey = abc\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0"
-        val result = viewModel.replaceEndpointPort(config, 8080)
-        assertTrue(result.contains("PrivateKey = abc"))
-        assertTrue(result.contains("AllowedIPs = 0.0.0.0/0"))
-        assertTrue(result.contains("1.2.3.4:8080"))
-    }
-
-    @Test
-    fun `replaceEndpointPort handles hostname endpoint`() {
-        val config = "Endpoint = vpn.example.com:51820"
-        val result = viewModel.replaceEndpointPort(config, 53)
-        assertTrue(result.contains("vpn.example.com:53"))
-        assertFalse(result.contains(":51820"))
+        coVerify { portRotationCoordinator.resetPersistedPort() }
     }
 
     // ── Kill-switch ───────────────────────────────────────────────────────────
