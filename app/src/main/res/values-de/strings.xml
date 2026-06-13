@@ -33,6 +33,10 @@
     <string name="vpn_state_connecting">Verbindung wird hergestellt…</string>
     <string name="vpn_state_disconnected">Nicht verbunden</string>
     <string name="vpn_state_connecting_subtitle">Tunnel wird aufgebaut</string>
+    <string name="vpn_state_connecting_attempt">Port %1$d wird versucht (%2$d von %3$d)…</string>
+    <string name="vpn_toast_reconnect_failed">Automatische Wiederverbindung fehlgeschlagen – bitte Netzwerk prüfen</string>
+    <string name="vpn_toast_reconnect_exhausted">Wiederverbindung: Alle Ports erschöpft</string>
+    <string name="vpn_toast_rotate_failed">Port-Wechsel fehlgeschlagen</string>
     <string name="vpn_state_disconnected_subtitle">Zum Verbinden tippen</string>
     <string name="vpn_section_connection">Verbindung</string>
     <string name="vpn_section_network">Netzwerk</string>
