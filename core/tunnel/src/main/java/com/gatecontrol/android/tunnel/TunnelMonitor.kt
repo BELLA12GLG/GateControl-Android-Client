@@ -1,5 +1,6 @@
 package com.gatecontrol.android.tunnel
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -7,6 +8,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Monitors the WireGuard tunnel health using a two-tier detection strategy:
@@ -64,10 +66,21 @@ class TunnelMonitor(
      * @param maxAttempts   ceiling before giving up
      * @param suggestedPort port the PortRotator recommends; null = keep original
      */
+    /**
+     * Monitor 向 ViewModel 发出的重连请求。
+     *
+     * @param attempt       1-based attempt number
+     * @param maxAttempts   ceiling before giving up
+     * @param suggestedPort port the PortRotator recommends; null = keep original
+     * @param connectDone   ViewModel 在 connect() 完成（成功或失败）后 complete 此对象。
+     *                      Monitor 等它完成后再查握手判断 recovered，
+     *                      避免用固定 delay 盲等导致有效端口被误判为失败。
+     */
     data class ReconnectRequest(
         val attempt: Int,
         val maxAttempts: Int,
         val suggestedPort: Int? = null,
+        val connectDone: CompletableDeferred<Boolean> = CompletableDeferred(),
     )
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -146,22 +159,27 @@ class TunnelMonitor(
                     if (consecutiveHandshakeFailures >= failuresBeforeDisconnect) {
                         _disconnectEvent.emit(Unit)
 
-                        // 等待 ViewModel 完成 disconnect() 后再发重连请求。
-                        // 无间隔时 disconnect() 和 connect() 可能并发执行，
-                        // 加剧 GoBackend 的 BackendException 风险。
+                        // 等待 ViewModel 完成 disconnect()，避免 disconnect/connect 并发
+                        // 触发 GoBackend BackendException（VPN fd 尚未释放就再次 setState UP）
                         delay(1_000L)
 
                         for (attempt in 0 until maxReconnectAttempts) {
                             val suggestedPort = portRotator?.nextPort()
-                            _reconnectEvent.emit(
-                                ReconnectRequest(
-                                    attempt = attempt + 1,
-                                    maxAttempts = maxReconnectAttempts,
-                                    suggestedPort = suggestedPort,
-                                )
+                            val req = ReconnectRequest(
+                                attempt = attempt + 1,
+                                maxAttempts = maxReconnectAttempts,
+                                suggestedPort = suggestedPort,
                             )
+                            _reconnectEvent.emit(req)
 
-                            delay(calculateBackoffMs(attempt))
+                            // 等 ViewModel 的 connect() 真正完成，再判断握手是否恢复。
+                            // 原实现用固定 delay(calculateBackoffMs) 盲等，2s 远小于
+                            // WireGuard 握手超时（~5s），导致有效端口被误判为失败并跳过。
+                            // connectDone 由 ViewModel 在 connect() return 后 complete，
+                            // 保证 recovered 判断基于真实握手结果。
+                            // 超时兜底：若 ViewModel 30s 内未响应（进程被杀等异常），
+                            // 视为连接失败，继续下一次轮换。
+                            withTimeoutOrNull(30_000L) { req.connectDone.await() }
 
                             val retryStats = try { statsProvider() } catch (_: Exception) { null }
                             val recovered = retryStats != null &&
@@ -196,12 +214,7 @@ class TunnelMonitor(
 
     companion object {
         fun calculateBackoffMs(attempt: Int): Long {
-            // 基准从 2_000 提升到 8_000：
-            // WireGuard 握手超时约 5 s，ViewModel 收到 reconnectEvent 后异步执行
-            // connect()，2 s 退避时间不足以等到握手完成，导致 statsProvider() 查到
-            // 的仍是旧握手时间戳，有效端口被误判为失败并跳过。
-            // 8 s > 5 s 握手超时 + 网络延迟，确保 recovered 判断基于真实结果。
-            val base = 8_000L
+            val base = 2_000L
             val computed = base * Math.pow(1.5, attempt.toDouble())
             return minOf(computed.toLong(), 60_000L)
         }
