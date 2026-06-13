@@ -291,21 +291,19 @@ class VpnViewModel @Inject constructor(
 
     /**
      * User-initiated "try a different port" — abandons the current port and
-     * runs the coordinator's retry loop, forcing the strategy to skip the
-     * port we are currently on.
+     * runs the coordinator's retry loop, forcing the strategy to skip BOTH
+     * the currently active port AND the original WG-config port.
      *
-     * Two-fold bug fix vs v6.0:
-     *   1. Passing `preferredFirstPort = null` is NOT enough to "skip the
-     *      current port" — the coordinator falls back to originalPort when
-     *      preferred is null, so a rotate from 51820 would try 51820 again.
-     *      We now seed `excludePorts` with the currently active port and
-     *      pass the persisted port as `preferredFirstPort` so the strategy
-     *      has full information about what NOT to try.
-     *   2. Re-resolve splitConfig and clear any in-flight attempt before
-     *      the new connect — the previous implementation called
-     *      `skipCurrent()` which had no effect after the disconnect (because
-     *      the new connectWithRetry call sets `skipRequested = false` at
-     *      the top of the mutex).
+     * Why exclude both:
+     *   v6.1 only excluded the active port. Result: if the user rotated
+     *   51820 → 443, then clicked rotate again, Coordinator would see
+     *   `activePort=443, excludePorts={443}` and fall back to `originalPort
+     *   = 51820` (which is NOT in excludePorts). So rotate-from-443 would
+     *   land on 51820 — appearing to "rotate back to the original port".
+     *
+     *   The user's intent for manual rotate is "try a DIFFERENT port" not
+     *   "any port that isn't this one". Excluding both ports the user has
+     *   already seen forces PortStrategy to pick a third option.
      */
     fun manualRotatePort() {
         viewModelScope.launch {
@@ -316,8 +314,17 @@ class VpnViewModel @Inject constructor(
             // Capture the port we want to rotate AWAY from BEFORE we
             // disconnect — disconnect() may null _activePort.
             val currentPort = portRotationCoordinator.activePort.value
-            val excludeSet = if (currentPort != null) setOf(currentPort) else emptySet()
-            Timber.d("VpnViewModel: rotating away from port $currentPort")
+
+            // Also exclude the original config port — see kdoc above.
+            val originalPort = try {
+                com.gatecontrol.android.tunnel.TunnelConfig.parse(rawConfig).getServerPort()
+            } catch (_: Exception) { 51820 }
+
+            val excludeSet = buildSet<Int> {
+                if (currentPort != null) add(currentPort)
+                add(originalPort)
+            }
+            Timber.d("VpnViewModel: rotate excluding ports $excludeSet (current=$currentPort, original=$originalPort)")
 
             try { tunnelManager.disconnect() } catch (_: Exception) {}
             delay(300L)
@@ -329,9 +336,7 @@ class VpnViewModel @Inject constructor(
             val outcome = portRotationCoordinator.connectWithRetry(
                 rawConfig = rawConfig,
                 splitConfig = splitConfig,
-                preferredFirstPort = null,   // not "go directly to PortStrategy" —
-                                             // but combined with excludePorts containing
-                                             // the current port, this forces a real rotate.
+                preferredFirstPort = null,
                 excludePorts = excludeSet,
             )
             when (outcome) {
