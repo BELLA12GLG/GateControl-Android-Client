@@ -265,4 +265,38 @@ class PortRotationCoordinatorTest {
         assertEquals(51820, attemptedPorts.first(),
             "Fallback to originalPort after excluding the stalling port")
     }
+
+    // ── v6.5: manual-rotate "rotate back to original" bug ────────────────────
+    //
+    // Regression: in v6.4, rotating 51820→443 worked, but rotating again from
+    // 443 would land back on 51820. Cause: ViewModel only excluded the active
+    // port (443), so Coordinator's "fall back to originalPort" path tried
+    // 51820 — which wasn't excluded. v6.5 ViewModel excludes BOTH the active
+    // port AND the original port so PortStrategy is the only path forward.
+
+    @Test
+    fun `rotating from non-original port with both excluded jumps to PortStrategy`() = runTest {
+        // Mimic the v6.5 ViewModel: excludePorts = {currentPort=443, originalPort=51820}
+        // Coordinator must NOT try 51820 even though it's the "fall back to original" choice.
+        var attemptedPorts = mutableListOf<Int>()
+        coEvery { tunnelManager.connect(any<String>(), any<SplitTunnelConfig>()) } answers {
+            val cfg = firstArg<String>()
+            val match = Regex("""Endpoint\s*=\s*[^:]+:(\d+)""").find(cfg)
+            match?.groupValues?.get(1)?.toIntOrNull()?.let { attemptedPorts.add(it) }
+        }
+        val outcome = coordinator.connectWithRetry(
+            rawConfig = sampleConfig,           // originalPort = 51820
+            splitConfig = SplitTunnelConfig(),
+            preferredFirstPort = null,
+            excludePorts = setOf(443, 51820),
+        )
+        assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
+        assertFalse(443 in attemptedPorts, "Active port 443 must not be retried")
+        assertFalse(51820 in attemptedPorts,
+            "Original port 51820 must not be tried — this is the v6.5 regression")
+        // PortStrategy well-known shortlist is [443, 53, 4500, 80]; 443 is
+        // excluded so next is 53.
+        assertEquals(53, attemptedPorts.first(),
+            "Should jump straight to PortStrategy's next well-known port")
+    }
 }
