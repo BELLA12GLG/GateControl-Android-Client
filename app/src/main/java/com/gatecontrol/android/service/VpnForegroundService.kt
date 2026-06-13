@@ -13,7 +13,6 @@ import com.gatecontrol.android.R
 import com.gatecontrol.android.common.Formatters
 import com.gatecontrol.android.data.SetupRepository
 import com.gatecontrol.android.tunnel.PortRotator
-import com.gatecontrol.android.tunnel.SplitTunnelConfig
 import com.gatecontrol.android.tunnel.TunnelConfig
 import com.gatecontrol.android.tunnel.TunnelManager
 import com.gatecontrol.android.tunnel.TunnelMonitor
@@ -35,8 +34,8 @@ import javax.inject.Inject
  *
  * 支持两种工作模式（通过 [EXTRA_AUTO_CONNECT] 区分）：
  *  - 服务器模式：由 VpnViewModel 负责连接，本服务只维护通知 + 监控
- *  - 纯 WireGuard 模式：开机自启时本服务直接调用 [TunnelManager.connect]，
- *    不依赖任何服务器接口
+ *  - 纯 WireGuard 模式：开机自启时本服务直接调用 [TunnelConnector.connectWithUserSettings]，
+ *    不依赖任何服务器接口（但会应用 split-tunnel 配置 — 见下方 fix #1）
  */
 @AndroidEntryPoint
 class VpnForegroundService : VpnService() {
@@ -44,6 +43,10 @@ class VpnForegroundService : VpnService() {
     // ── Hilt 直接注入，不再依赖 TunnelStateHolder 静态持有 ─────────────────
     @Inject lateinit var tunnelManager: TunnelManager
     @Inject lateinit var setupRepository: SetupRepository
+    // fix #1：开机自启路径必须通过 TunnelConnector 才能应用用户的 split-tunnel 配置。
+    // 旧实现直接 `tunnelManager.connect(rawConfig, SplitTunnelConfig())` 传空配置，
+    // 导致用户设的 exclude/include 规则全部丢失。
+    @Inject lateinit var tunnelConnector: TunnelConnector
 
     companion object {
         const val CHANNEL_ID = "vpn_status"
@@ -120,7 +123,7 @@ class VpnForegroundService : VpnService() {
         stopAllJobs()
     }
 
-    // ── 开机自启：直接连接隧道（纯 WireGuard 模式）────────────────────────
+    // ── 开机自启：直接连接隧道 ────────────────────────────────────────────
 
     private fun startAutoConnect() {
         autoConnectJob?.cancel()
@@ -138,15 +141,22 @@ class VpnForegroundService : VpnService() {
                     return@launch
                 }
 
-                val rawConfig = setupRepository.getWireGuardConfig()
-                if (rawConfig.isEmpty()) {
+                if (!setupRepository.hasWireGuardConfig()) {
                     Timber.w("VpnForegroundService: no WireGuard config available, cannot auto-connect")
                     stopSelf()
                     return@launch
                 }
 
-                Timber.d("VpnForegroundService: auto-connecting tunnel")
-                tunnelManager.connect(rawConfig, SplitTunnelConfig())
+                Timber.d("VpnForegroundService: auto-connecting tunnel via TunnelConnector")
+                // fix #1：通过 TunnelConnector 应用用户保存的 split-tunnel 配置
+                // （旧代码这里是 `tunnelManager.connect(rawConfig, SplitTunnelConfig())`，
+                // 永远传空配置，导致开机自启时分流失效）。
+                val connected = tunnelConnector.connectWithUserSettings()
+                if (!connected) {
+                    Timber.w("VpnForegroundService: auto-connect aborted by TunnelConnector")
+                    stopSelf()
+                    return@launch
+                }
                 connectedSinceMs = System.currentTimeMillis()
                 Timber.i("VpnForegroundService: tunnel auto-connected successfully")
 
