@@ -8,7 +8,6 @@ import com.gatecontrol.android.data.SetupRepository
 import com.gatecontrol.android.data.SettingsRepository
 import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.tunnel.WgConfigValidator
-import com.gatecontrol.android.network.UpdateCheckResponse
 import com.gatecontrol.android.common.Validation
 import org.json.JSONArray
 import org.json.JSONObject
@@ -54,7 +53,6 @@ data class SettingsUiState(
     val apiToken: String = "",
     val connectionTestStatus: ConnectionTestStatus = ConnectionTestStatus.Idle,
     val isLoading: Boolean = false,
-    val updateInfo: UpdateCheckResponse? = null,
     val appVersion: String = "",
     val error: String? = null,
     val success: String? = null,
@@ -66,6 +64,12 @@ data class SettingsUiState(
     val dnsSecondary: String = "",
     // Diagnostics (v6.2)
     val loggingEnabled: Boolean = true,
+    // App-layer DNS (v6.4) — these affect OkHttp REST calls only,
+    // NOT the WireGuard tunnel DNS.
+    val staticHosts: Map<String, String> = emptyMap(),
+    val dohUpstreamUrl: String = "",
+    val dnsCacheEnabled: Boolean = true,
+    val dnsCacheTtlSeconds: Int = 3600,
 )
 
 @HiltViewModel
@@ -73,7 +77,8 @@ class SettingsViewModel @Inject constructor(
     private val setupRepository: SetupRepository,
     private val settingsRepository: SettingsRepository,
     private val apiClientProvider: ApiClientProvider,
-    private val licenseRepository: LicenseRepository
+    private val licenseRepository: LicenseRepository,
+    private val dnsResolver: com.gatecontrol.android.network.DnsResolver,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -179,6 +184,36 @@ class SettingsViewModel @Inject constructor(
             }
         }
 
+        // v6.4 — App-layer DNS preferences. Each preference has its own
+        // collector so DataStore mutations are picked up independently,
+        // but we MUST push the combined snapshot to DnsResolver on every
+        // change so its asOkHttpDns adapter has the latest config.
+        viewModelScope.launch {
+            settingsRepository.getStaticHostsJson().collect { json ->
+                val map = parseStaticHostsJsonForUi(json)
+                _uiState.update { it.copy(staticHosts = map) }
+                pushDnsResolverConfig()
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.getDohUpstreamUrl().collect { url ->
+                _uiState.update { it.copy(dohUpstreamUrl = url) }
+                pushDnsResolverConfig()
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.getDnsCacheEnabled().collect { on ->
+                _uiState.update { it.copy(dnsCacheEnabled = on) }
+                pushDnsResolverConfig()
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.getDnsCacheTtlSeconds().collect { ttl ->
+                _uiState.update { it.copy(dnsCacheTtlSeconds = ttl) }
+                pushDnsResolverConfig()
+            }
+        }
+
         _uiState.update {
             it.copy(
                 serverUrl = setupRepository.getServerUrl(),
@@ -186,6 +221,34 @@ class SettingsViewModel @Inject constructor(
             )
         }
     }
+
+    /**
+     * Read the current UiState DNS settings and push a fresh [DnsResolver.Config]
+     * snapshot. Called from every DNS-preference collector AND from the explicit
+     * setters below — DataStore writes propagate back through the collectors so
+     * one of those paths is redundant in steady state, but the setter-side push
+     * makes the change visible to in-flight OkHttp calls without waiting for
+     * DataStore round-trip latency.
+     */
+    private fun pushDnsResolverConfig() {
+        val s = _uiState.value
+        dnsResolver.updateConfig(
+            com.gatecontrol.android.network.DnsResolver.Config(
+                staticHosts = com.gatecontrol.android.network.DnsResolver
+                    .parseStaticHostsJson(
+                        com.gatecontrol.android.network.DnsResolver
+                            .encodeStaticHostsJson(s.staticHosts)
+                    ),
+                dohUpstreamUrl = s.dohUpstreamUrl,
+                cacheEnabled = s.dnsCacheEnabled,
+                cacheTtlSeconds = s.dnsCacheTtlSeconds,
+            )
+        )
+    }
+
+    private fun parseStaticHostsJsonForUi(json: String): Map<String, String> =
+        com.gatecontrol.android.network.DnsResolver
+            .parseStaticHostsJsonAsStringMap(json)
 
     fun setTheme(theme: String) {
         viewModelScope.launch {
@@ -249,6 +312,79 @@ class SettingsViewModel @Inject constructor(
             com.gatecontrol.android.FileLoggingTree.setEnabled(enabled)
             _uiState.update { it.copy(loggingEnabled = enabled) }
         }
+    }
+
+    // ── App-layer DNS setters (v6.4) ─────────────────────────────────────────
+    //
+    // Each setter does three things in this order:
+    //   1. Persist to DataStore (durable across restarts).
+    //   2. Update _uiState (instant UI feedback, no DataStore round-trip).
+    //   3. Push the new config to DnsResolver so in-flight OkHttp lookups
+    //      see the change immediately, not after the collector fires.
+
+    fun addStaticHost(host: String, ip: String) {
+        val trimmedHost = host.trim().lowercase()
+        val trimmedIp = ip.trim()
+        if (trimmedHost.isBlank() || trimmedIp.isBlank()) return
+        viewModelScope.launch {
+            val current = _uiState.value.staticHosts.toMutableMap()
+            current[trimmedHost] = trimmedIp
+            val json = com.gatecontrol.android.network.DnsResolver
+                .encodeStaticHostsJson(current)
+            settingsRepository.setStaticHostsJson(json)
+            _uiState.update { it.copy(staticHosts = current.toSortedMap().toMap()) }
+            pushDnsResolverConfig()
+            dnsResolver.clearCache()   // invalidate so the override takes effect now
+        }
+    }
+
+    fun removeStaticHost(host: String) {
+        val key = host.lowercase()
+        viewModelScope.launch {
+            val current = _uiState.value.staticHosts.toMutableMap()
+            if (current.remove(key) == null) return@launch
+            val json = com.gatecontrol.android.network.DnsResolver
+                .encodeStaticHostsJson(current)
+            settingsRepository.setStaticHostsJson(json)
+            _uiState.update { it.copy(staticHosts = current.toMap()) }
+            pushDnsResolverConfig()
+            dnsResolver.clearCache()
+        }
+    }
+
+    fun setDohUpstreamUrl(url: String) {
+        val trimmed = url.trim()
+        viewModelScope.launch {
+            settingsRepository.setDohUpstreamUrl(trimmed)
+            _uiState.update { it.copy(dohUpstreamUrl = trimmed) }
+            pushDnsResolverConfig()
+            dnsResolver.clearCache()   // results from old upstream may be wrong now
+        }
+    }
+
+    fun setDnsCacheEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setDnsCacheEnabled(enabled)
+            _uiState.update { it.copy(dnsCacheEnabled = enabled) }
+            pushDnsResolverConfig()
+            if (!enabled) dnsResolver.clearCache()
+        }
+    }
+
+    fun setDnsCacheTtlSeconds(seconds: Int) {
+        viewModelScope.launch {
+            settingsRepository.setDnsCacheTtlSeconds(seconds)
+            _uiState.update { it.copy(dnsCacheTtlSeconds = seconds) }
+            pushDnsResolverConfig()
+            // Don't clear cache on TTL change — existing entries keep their
+            // old expiry, new entries get the new TTL. Less surprising than
+            // wiping a live cache when the user nudges a slider.
+        }
+    }
+
+    /** User-facing "delete all cached entries". */
+    fun clearDnsCache() {
+        dnsResolver.clearCache()
     }
 
     /**
@@ -422,34 +558,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun checkForUpdate(currentVersion: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-            try {
-                val serverUrl = setupRepository.getServerUrl()
-                if (serverUrl.isBlank()) {
-                    _uiState.update { it.copy(isLoading = false) }
-                    return@launch
-                }
-                val client = apiClientProvider.getClient(serverUrl)
-                val response = client.checkUpdate(
-                    version = currentVersion,
-                    platform = "android",
-                    client = "android"
-                )
-                _uiState.update { it.copy(isLoading = false, updateInfo = response) }
-            } catch (e: Exception) {
-                Timber.e(e, "Update check failed")
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        error = "Update check: ${e.localizedMessage}"
-                    )
-                }
-            }
-        }
-    }
-
     fun refreshLicense() {
         viewModelScope.launch {
             try {
@@ -481,10 +589,6 @@ class SettingsViewModel @Inject constructor(
                 _uiState.update { it.copy(error = "License refresh failed: ${e.localizedMessage}") }
             }
         }
-    }
-
-    fun dismissUpdate() {
-        _uiState.update { it.copy(updateInfo = null) }
     }
 
     private val _requestFilePicker = kotlinx.coroutines.flow.MutableStateFlow(false)
