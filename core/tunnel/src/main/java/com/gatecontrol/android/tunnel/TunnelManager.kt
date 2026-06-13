@@ -11,6 +11,7 @@ import com.wireguard.config.InetAddresses
 import com.wireguard.config.InetNetwork
 import com.wireguard.config.Peer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -88,6 +89,17 @@ class TunnelManager @Inject constructor(private val context: Context) {
                 _state.value = TunnelState.Connecting
                 Timber.d("Connecting tunnel with split-tunnel mode: ${splitConfig.mode}")
 
+                // ── 修复 BackendException ────────────────────────────────────────
+                // 问题：快速断开后立即重连，GoBackend 内部的 WireGuard Go 运行时
+                //       尚未完全释放 VPN 文件描述符，再次调用 setState(UP) 就会
+                //       在 setStateInternal(line 198) 抛出 BackendException。
+                //
+                // 修复策略：
+                //  1. 连接前先显式发一次 setState(DOWN)，确保 Go 层状态归零。
+                //     即使隧道已经是 DOWN，这个调用也是幂等且无害的。
+                //  2. 给系统 300ms 释放底层 VPN 套接字，再执行 UP。
+                //  3. 若 backend 为 null（首次或被重置），重新初始化。
+                // ────────────────────────────────────────────────────────────────
                 val currentBackend = backend ?: run {
                     initialize()
                     backend
@@ -95,6 +107,15 @@ class TunnelManager @Inject constructor(private val context: Context) {
 
                 val currentTunnel = tunnel
                     ?: throw IllegalStateException("Tunnel not initialized")
+
+                // 先强制下线，确保 Go 层干净
+                try {
+                    currentBackend.setState(currentTunnel, Tunnel.State.DOWN, null)
+                } catch (ignored: Exception) {
+                    // 已经是 DOWN 时会抛异常，忽略即可
+                }
+                // 等待系统释放 VPN 文件描述符
+                delay(300)
 
                 currentBackend.setState(currentTunnel, Tunnel.State.UP, wgConfig)
 
@@ -106,6 +127,9 @@ class TunnelManager @Inject constructor(private val context: Context) {
                 Timber.i("Tunnel connected successfully")
             } catch (e: Exception) {
                 Timber.e(e, "Failed to connect tunnel")
+                // 连接失败时重置 backend，下次重连强制重新初始化 GoBackend
+                // 避免残留的错误状态导致后续连接持续失败
+                backend = null
                 _state.value = TunnelState.Error(e.message ?: "Unknown error")
             }
         }
@@ -129,10 +153,15 @@ class TunnelManager @Inject constructor(private val context: Context) {
                 prevTxBytes = 0L
                 prevStatsTime = 0L
 
+                // 重置 backend，下次 connect() 会重新初始化 GoBackend。
+                // 这样可避免快速断开/重连时 Go 运行时持有旧 VPN fd 导致的 BackendException。
+                backend = null
+
                 _state.value = TunnelState.Disconnected
                 Timber.i("Tunnel disconnected")
             } catch (e: Exception) {
                 Timber.e(e, "Failed to disconnect tunnel")
+                backend = null  // 即使断开失败也重置，防止后续连接用到损坏的实例
                 _state.value = TunnelState.Error(e.message ?: "Unknown error")
             }
         }
