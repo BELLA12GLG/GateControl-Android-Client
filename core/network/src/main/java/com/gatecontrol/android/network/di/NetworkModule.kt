@@ -5,6 +5,7 @@ import com.gatecontrol.android.common.MachineId
 import com.gatecontrol.android.data.SetupRepository
 import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.network.AuthInterceptor
+import com.gatecontrol.android.network.DnsResolver
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -40,6 +41,7 @@ object NetworkModule {
     @Singleton
     fun provideApiClientProvider(
         authInterceptor: AuthInterceptor,
-        @ApplicationContext context: Context
-    ): ApiClientProvider = ApiClientProvider(authInterceptor, context)
+        dnsResolver: DnsResolver,
+        @ApplicationContext context: Context,
+    ): ApiClientProvider = ApiClientProvider(authInterceptor, dnsResolver, context)
 }
