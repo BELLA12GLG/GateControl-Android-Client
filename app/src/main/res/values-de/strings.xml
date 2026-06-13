@@ -204,6 +204,7 @@
     <string name="logs_empty">Keine Protokolle vorhanden</string>
     <string name="logs_refresh">Aktualisieren</string>
     <string name="logs_export">Exportieren</string>
+    <string name="logs_export_failed">Protokoll-Export fehlgeschlagen</string>
 
     <!-- Notifications -->
     <string name="notif_channel_vpn">VPN-Status</string>
