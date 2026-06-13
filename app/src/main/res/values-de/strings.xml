@@ -18,15 +18,25 @@
     <string name="vpn_connect">Verbinden</string>
     <string name="vpn_disconnect">Trennen</string>
     <string name="vpn_server">Server</string>
-    <string name="vpn_handshake">Handshake</string>
-    <string name="vpn_received">&#8595; Empfangen</string>
-    <string name="vpn_sent">&#8593; Gesendet</string>
+    <string name="vpn_handshake">Laufzeit</string>
+    <string name="vpn_received">Empfangen</string>
+    <string name="vpn_sent">Gesendet</string>
+    <string name="vpn_down_speed">Ab</string>
+    <string name="vpn_up_speed">Auf</string>
     <string name="vpn_kill_switch">Kill-Switch</string>
     <string name="vpn_kill_switch_desc">Datenverkehr ohne VPN blockieren</string>
     <string name="vpn_kill_switch_system">In den System-VPN-Einstellungen konfigurieren</string>
     <string name="vpn_bandwidth">Bandbreite</string>
     <string name="vpn_download">Download</string>
     <string name="vpn_upload">Upload</string>
+    <string name="vpn_state_connected">Verbunden</string>
+    <string name="vpn_state_connecting">Verbindung wird hergestellt…</string>
+    <string name="vpn_state_disconnected">Nicht verbunden</string>
+    <string name="vpn_state_connecting_subtitle">Tunnel wird aufgebaut</string>
+    <string name="vpn_state_disconnected_subtitle">Zum Verbinden tippen</string>
+    <string name="vpn_section_connection">Verbindung</string>
+    <string name="vpn_section_network">Netzwerk</string>
+    <string name="split_tunnel_title">Split-Tunneling</string>
 
     <!-- Traffic -->
     <string name="traffic_title">Datenverbrauch</string>
@@ -237,4 +247,28 @@
     <string name="permission_camera">Kameraberechtigung für QR-Scan erforderlich</string>
     <string name="permission_notification">Benachrichtigungsberechtigung erforderlich</string>
     <string name="root_warning">Dieses Gerät scheint gerootet zu sein. Die VPN-Sicherheit könnte beeinträchtigt sein.</string>
+    <!-- iOS Redesign-Erweiterungen -->
+    <string name="settings_off">Aus</string>
+    <string name="settings_section_account">Konto</string>
+    <string name="settings_section_general">Allgemein</string>
+    <string name="settings_section_appearance">Darstellung</string>
+    <string name="settings_section_diagnostics">Diagnose</string>
+    <string name="settings_server_unset">Nicht festgelegt</string>
+    <string name="settings_theme_system">System</string>
+    <string name="settings_version_label">Version</string>
+    <string name="settings_connection_testing">Wird geprüft…</string>
+    <string name="services_section_available">Verfügbare Dienste</string>
+    <string name="split_tunnel_exclude_short">Ausschließen</string>
+    <string name="split_tunnel_include_short">Nur diese</string>
+    <string name="split_tunnel_mode_header">Modus</string>
+    <string name="split_tunnel_networks_header">Netzwerke</string>
+    <string name="split_tunnel_apps_header">Apps</string>
+    <string name="split_tunnel_off_footer">Split-Tunneling ist deaktiviert. Der gesamte Datenverkehr läuft über das VPN.</string>
+    <string name="split_tunnel_exclude_footer">Ausgewählte Netzwerke und Apps <b>umgehen</b> das VPN. Der restliche Verkehr bleibt verschlüsselt.</string>
+    <string name="split_tunnel_include_footer">Nur ausgewählte Netzwerke und Apps werden über das VPN geleitet.</string>
+    <string name="split_tunnel_link_local">Link-Local-Netzwerk</string>
+    <string name="split_tunnel_cidr_label">CIDR-Bereich</string>
+    <string name="split_tunnel_cidr_invalid">Kein gültiger CIDR (z. B. 10.0.1.0/24)</string>
+    <string name="split_tunnel_cidr_duplicate">Bereits in der Liste</string>
+    <string name="split_tunnel_label_hint">z. B. „Heimnetz“</string>
 </resources>
