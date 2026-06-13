@@ -28,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
+@Suppress("DEPRECATION") // Tests intentionally exercise deprecated v1 split-tunnel API for backward compatibility.
 class SettingsViewModelTest {
 
     private val testDispatcher = StandardTestDispatcher()
