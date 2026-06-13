@@ -33,6 +33,10 @@
     <string name="vpn_state_connecting">Connecting…</string>
     <string name="vpn_state_disconnected">Not connected</string>
     <string name="vpn_state_connecting_subtitle">Establishing tunnel</string>
+    <string name="vpn_state_connecting_attempt">Trying port %1$d (%2$d of %3$d)…</string>
+    <string name="vpn_toast_reconnect_failed">Auto-reconnect failed — please check your network</string>
+    <string name="vpn_toast_reconnect_exhausted">Auto-reconnect: all ports exhausted</string>
+    <string name="vpn_toast_rotate_failed">Port rotation failed</string>
     <string name="vpn_state_disconnected_subtitle">Tap to connect</string>
     <string name="vpn_section_connection">Connection</string>
     <string name="vpn_section_network">Network</string>
