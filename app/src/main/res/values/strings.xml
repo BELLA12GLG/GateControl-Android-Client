@@ -179,6 +179,7 @@
     <string name="settings_license_managed">License is managed server-side</string>
     <string name="settings_logs">Logs</string>
     <string name="settings_logs_view">View Logs</string>
+    <string name="settings_logging_enabled">Log to file</string>
     <string name="settings_logs_export">Export Logs</string>
     <string name="settings_about">About</string>
     <string name="settings_version">Version %1$s</string>
