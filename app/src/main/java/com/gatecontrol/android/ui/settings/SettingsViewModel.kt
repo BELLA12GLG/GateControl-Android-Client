@@ -64,6 +64,8 @@ data class SettingsUiState(
     val ipProtocol: String = "auto",
     val dnsPrimary: String = "",
     val dnsSecondary: String = "",
+    // Diagnostics (v6.2)
+    val loggingEnabled: Boolean = true,
 )
 
 @HiltViewModel
@@ -171,6 +173,11 @@ class SettingsViewModel @Inject constructor(
                 _uiState.update { it.copy(dnsSecondary = addr) }
             }
         }
+        viewModelScope.launch {
+            settingsRepository.getLoggingEnabled().collect { on ->
+                _uiState.update { it.copy(loggingEnabled = on) }
+            }
+        }
 
         _uiState.update {
             it.copy(
@@ -228,6 +235,19 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             settingsRepository.setDnsSecondary(value)
             _uiState.update { it.copy(dnsSecondary = value.trim()) }
+        }
+    }
+
+    /**
+     * Toggle the file-logging tree. Persists to DataStore and applies
+     * immediately to [com.gatecontrol.android.FileLoggingTree] so the
+     * change takes effect on the very next log line without restart.
+     */
+    fun setLoggingEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setLoggingEnabled(enabled)
+            com.gatecontrol.android.FileLoggingTree.setEnabled(enabled)
+            _uiState.update { it.copy(loggingEnabled = enabled) }
         }
     }
 
