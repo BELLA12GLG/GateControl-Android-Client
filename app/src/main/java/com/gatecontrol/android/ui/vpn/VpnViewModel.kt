@@ -291,9 +291,21 @@ class VpnViewModel @Inject constructor(
 
     /**
      * User-initiated "try a different port" — abandons the current port and
-     * runs the coordinator's retry loop. Unlike [connect], we do NOT prefer
-     * the persisted port (that's almost certainly the one the user wants to
-     * move away from).
+     * runs the coordinator's retry loop, forcing the strategy to skip the
+     * port we are currently on.
+     *
+     * Two-fold bug fix vs v6.0:
+     *   1. Passing `preferredFirstPort = null` is NOT enough to "skip the
+     *      current port" — the coordinator falls back to originalPort when
+     *      preferred is null, so a rotate from 51820 would try 51820 again.
+     *      We now seed `excludePorts` with the currently active port and
+     *      pass the persisted port as `preferredFirstPort` so the strategy
+     *      has full information about what NOT to try.
+     *   2. Re-resolve splitConfig and clear any in-flight attempt before
+     *      the new connect — the previous implementation called
+     *      `skipCurrent()` which had no effect after the disconnect (because
+     *      the new connectWithRetry call sets `skipRequested = false` at
+     *      the top of the mutex).
      */
     fun manualRotatePort() {
         viewModelScope.launch {
@@ -301,24 +313,26 @@ class VpnViewModel @Inject constructor(
             val rawConfig = setupRepository.getWireGuardConfig()
             if (rawConfig.isEmpty()) return@launch
 
+            // Capture the port we want to rotate AWAY from BEFORE we
+            // disconnect — disconnect() may null _activePort.
+            val currentPort = portRotationCoordinator.activePort.value
+            val excludeSet = if (currentPort != null) setOf(currentPort) else emptySet()
+            Timber.d("VpnViewModel: rotating away from port $currentPort")
+
             try { tunnelManager.disconnect() } catch (_: Exception) {}
             delay(300L)
 
-            // Re-resolve in case the user changed settings since last connect.
             val serverUrl = setupRepository.getServerUrl()
             val splitConfig = tunnelConnector.resolveSplitTunnelConfig(serverUrl)
             lastSplitTunnelConfig = splitConfig
 
-            // skipCurrent flags the coordinator to abandon the current port
-            // on its next iteration. It's a no-op if no sequence is in
-            // flight, which is fine — the next connectWithRetry call below
-            // is the one that does the actual work.
-            portRotationCoordinator.skipCurrent()
-
             val outcome = portRotationCoordinator.connectWithRetry(
                 rawConfig = rawConfig,
                 splitConfig = splitConfig,
-                preferredFirstPort = null, // skip persisted — user wants new
+                preferredFirstPort = null,   // not "go directly to PortStrategy" —
+                                             // but combined with excludePorts containing
+                                             // the current port, this forces a real rotate.
+                excludePorts = excludeSet,
             )
             when (outcome) {
                 is PortRotationCoordinator.Outcome.Connected -> Unit
