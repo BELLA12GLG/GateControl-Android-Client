@@ -183,11 +183,6 @@
     <string name="settings_logs_export">导出日志</string>
     <string name="settings_about">关于</string>
     <string name="settings_version">版本 %1$s</string>
-    <string name="settings_update_available">有可用更新:%1$s</string>
-    <string name="settings_update_install">安装</string>
-    <string name="settings_update_later">稍后</string>
-    <string name="settings_update_none">暂无更新</string>
-    <string name="settings_check_for_updates">检查更新</string>
 
     <!-- 初始化 / 设置向导 -->
     <string name="setup_title">连接到 GateControl</string>
@@ -212,14 +207,11 @@
 
     <!-- 通知 -->
     <string name="notif_channel_vpn">VPN 状态</string>
-    <string name="notif_channel_update">更新提醒</string>
     <string name="notif_channel_rdp">远程桌面会话</string>
     <string name="notif_vpn_connected">已连接到 %1$s</string>
     <string name="notif_vpn_disconnected">VPN 已断开</string>
     <string name="notif_vpn_reconnecting">正在重连…</string>
     <string name="notif_vpn_stats">↓ %1$s · ↑ %2$s · %3$s</string>
-    <string name="notif_update_title">有可用更新</string>
-    <string name="notif_update_body">版本 %1$s 已可下载</string>
     <string name="notif_peer_expiry">证书将在 %1$d 天后过期</string>
     <string name="notif_peer_expired">证书已过期</string>
     <string name="peer_disabled_by_server">服务端已禁用此 VPN 接入,连接已断开。</string>
@@ -298,6 +290,29 @@
     <string name="dns_invalid">不是有效的 IPv4 或 IPv6 地址</string>
     <string name="dns_presets_header">预设</string>
     <string name="dns_preset_system">系统默认</string>
+
+    <!-- 应用层 DNS(v6.4)-->
+    <string name="dns_app_doh_header">应用 DNS(DoH)</string>
+    <string name="dns_app_doh_footer">GateControl 应用解析服务器域名时使用的 DNS-over-HTTPS 端点。不影响 VPN 隧道内的 DNS。</string>
+    <string name="dns_app_doh_url_label">DoH 地址</string>
+    <string name="dns_app_doh_presets_header">DoH 预设</string>
+    <string name="dns_static_hosts_header">静态 hosts</string>
+    <string name="dns_static_hosts_footer">把指定域名固定到特定 IP。优先级高于 DoH 和系统 DNS。适用于域名被污染或无法解析的场景。</string>
+    <string name="dns_static_hosts_empty">无静态记录</string>
+    <string name="dns_static_hosts_add">添加记录</string>
+    <string name="dns_static_hosts_add_title">添加静态 host</string>
+    <string name="dns_static_hosts_host_label">域名</string>
+    <string name="dns_static_hosts_ip_label">IP 地址</string>
+    <string name="dns_static_hosts_duplicate">该域名已存在静态记录</string>
+    <string name="dns_static_hosts_remove">删除</string>
+    <string name="dns_cache_header">DNS 缓存</string>
+    <string name="dns_cache_footer">应用层 DNS 结果缓存。加快重连,减少查询。不影响 VPN 隧道。</string>
+    <string name="dns_cache_enabled_label">启用缓存</string>
+    <string name="dns_cache_ttl_5m">5 分钟</string>
+    <string name="dns_cache_ttl_30m">30 分钟</string>
+    <string name="dns_cache_ttl_1h">1 小时</string>
+    <string name="dns_cache_ttl_6h">6 小时</string>
+    <string name="dns_cache_clear">立即清空缓存</string>
 
     <!-- 应用选择器增强 -->
     <string name="split_tunnel_pick_apps">选择应用</string>
