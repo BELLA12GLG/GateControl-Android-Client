@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -18,6 +19,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.gatecontrol.android.ui.theme.GateControlTheme
+
+// =============================================================================
+// Gc*Button — Legacy compatibility wrappers
+// =============================================================================
+//
+// Kept around so screens not yet migrated to the new iOS component set (mainly
+// Setup and a couple of cards) keep compiling. They now render in iOS style:
+// 50dp tall, 14dp corner radius, semibold label, full-width.
+//
+// New screens should import from `ui.components.ios.*` directly
+// (IosPrimaryButton / IosTintedButton / IosTextButton) instead.
+
+private val ButtonShape = RoundedCornerShape(14.dp)
+private val ButtonHeight = 50.dp
 
 @Composable
 fun GcPrimaryButton(
@@ -32,12 +47,13 @@ fun GcPrimaryButton(
         enabled = enabled && !loading,
         modifier = modifier
             .fillMaxWidth()
-            .height(48.dp),
+            .height(ButtonHeight),
+        shape = ButtonShape,
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.38f),
-            disabledContentColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.38f),
+            disabledContentColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.5f),
         ),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
     ) {
@@ -65,24 +81,23 @@ fun GcSecondaryButton(
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    TextButton(
+    Button(
         onClick = onClick,
         enabled = enabled,
         modifier = modifier
             .fillMaxWidth()
-            .height(48.dp),
-        colors = ButtonDefaults.textButtonColors(
-            containerColor = MaterialTheme.colorScheme.surface,
+            .height(ButtonHeight),
+        shape = ButtonShape,
+        colors = ButtonDefaults.buttonColors(
+            // iOS "tinted" — semi-opaque accent fill
+            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
             contentColor = MaterialTheme.colorScheme.primary,
-            disabledContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.38f),
-            disabledContentColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.38f),
+            disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f),
+            disabledContentColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
         ),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelLarge,
-        )
+        Text(text = text, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -93,29 +108,33 @@ fun GcOutlineButton(
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    OutlinedButton(
+    // iOS doesn't really do outlined buttons — render this as a tinted/secondary
+    // button instead, which is the closest visual match to the iOS HIG.
+    GcSecondaryButton(
+        text = text,
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier
-            .fillMaxWidth()
-            .height(48.dp),
-        colors = ButtonDefaults.outlinedButtonColors(
-            contentColor = MaterialTheme.colorScheme.onSurface,
-            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-        ),
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (enabled) {
-                MaterialTheme.colorScheme.outline
-            } else {
-                MaterialTheme.colorScheme.outline.copy(alpha = 0.38f)
-            },
-        ),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
+        modifier = modifier,
+    )
+}
+
+@Composable
+fun GcTextButton(
+    text: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier,
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (enabled) MaterialTheme.colorScheme.primary
+                    else GateControlTheme.extraColors.text3,
         )
     }
 }
