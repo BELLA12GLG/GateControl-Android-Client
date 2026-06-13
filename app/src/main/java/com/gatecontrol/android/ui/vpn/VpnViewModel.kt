@@ -9,9 +9,9 @@ import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.network.PermissionFlags
 import com.gatecontrol.android.network.TrafficStats
 import com.gatecontrol.android.network.VpnService
+import com.gatecontrol.android.service.PortRotationCoordinator
 import com.gatecontrol.android.service.TunnelConnector
 import com.gatecontrol.android.service.TunnelStateHolder
-import com.gatecontrol.android.tunnel.PortRotator
 import com.gatecontrol.android.tunnel.SplitTunnelConfig
 import com.gatecontrol.android.tunnel.TunnelConfig
 import com.gatecontrol.android.tunnel.TunnelManager
@@ -19,9 +19,12 @@ import com.gatecontrol.android.tunnel.TunnelState
 import com.gatecontrol.android.tunnel.TunnelStats
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -37,9 +40,10 @@ class VpnViewModel @Inject constructor(
     private val licenseRepository: LicenseRepository,
     private val apiClientProvider: ApiClientProvider,
     private val tunnelManager: TunnelManager,
-    // fix #3：TunnelConnector 是 split-tunnel 配置解析的唯一权威源。
-    // VpnViewModel 不再自己复制 resolveSplitTunnelConfig — 那会导致两份实现发散。
     private val tunnelConnector: TunnelConnector,
+    // v6: single coordinator for all connect-with-retry flows.
+    // Replaces VpnViewModel's own PortRotator + reconnectWithPort + manualRotate.
+    private val portRotationCoordinator: PortRotationCoordinator,
 ) : ViewModel() {
 
     val tunnelState: StateFlow<TunnelState> = tunnelManager.state
@@ -73,13 +77,32 @@ class VpnViewModel @Inject constructor(
     val isWireGuardOnlyMode: Boolean
         get() = setupRepository.isWireGuardOnlyMode()
 
-    // ── Port rotation state ───────────────────────────────────────────────────
+    // ── Port rotation state — owned by PortRotationCoordinator ───────────────
 
-    private val _activePort = MutableStateFlow<Int?>(null)
-    val activePort: StateFlow<Int?> = _activePort.asStateFlow()
+    /** The port we're currently connected on (null = original / unknown). */
+    val activePort: StateFlow<Int?> = portRotationCoordinator.activePort
 
-    private var portRotator: PortRotator? = null
+    /** Attempt progress for the UI (e.g. "Trying port 443 (3/8)"). */
+    val currentAttempt: StateFlow<PortRotationCoordinator.AttemptInfo?> =
+        portRotationCoordinator.currentAttempt
+
+    /**
+     * One-shot toast messages — primarily used by Monitor-triggered reconnect
+     * outcomes that the user should know about ("port rotation failed —
+     * tunnel is down").
+     */
+    private val _toastMessages = MutableSharedFlow<ToastMessage>(extraBufferCapacity = 4)
+    val toastMessages: SharedFlow<ToastMessage> = _toastMessages.asSharedFlow()
+
+    /** Cached split-tunnel + network preferences from the most recent connect. */
     private var lastSplitTunnelConfig: SplitTunnelConfig = SplitTunnelConfig()
+
+    /** Distinguishes the kind of reconnect outcome the UI should announce. */
+    enum class ToastMessage {
+        RECONNECT_FAILED,
+        RECONNECT_EXHAUSTED,
+        ROTATE_FAILED,
+    }
 
     // ── Token 验证（仅服务器模式）────────────────────────────────────────────
 
@@ -151,22 +174,21 @@ class VpnViewModel @Inject constructor(
                 }
             }
         }
-
-        viewModelScope.launch {
-            TunnelStateHolder.reconnectEvents.collect { req ->
-                Timber.i(
-                    "VpnViewModel: reconnect requested attempt=${req.attempt}/${req.maxAttempts}" +
-                        " suggestedPort=${req.suggestedPort}"
-                )
-                // 把整个 req 传入，connect() 完成后通过 req.connectDone 通知 Monitor，
-                // 让 Monitor 在真实握手结果出来后再判断 recovered，而非盲等固定时间。
-                reconnectWithPort(req)
-            }
-        }
     }
 
     // ── 连接 / 断开 ───────────────────────────────────────────────────────────
 
+    /**
+     * Connect the tunnel. Delegates to [PortRotationCoordinator] which:
+     *   1. tries a persisted "last successful port" first (if any),
+     *   2. falls back to the original port,
+     *   3. rotates through [com.gatecontrol.android.tunnel.PortStrategy]
+     *      candidates if the above fail.
+     *
+     * All retry logic, persistence, and progress tracking live in the
+     * coordinator — this method just wires the WireGuard config + split
+     * tunnel config in.
+     */
     fun connect() {
         viewModelScope.launch {
             val rawConfig = setupRepository.getWireGuardConfig()
@@ -175,71 +197,32 @@ class VpnViewModel @Inject constructor(
                 return@launch
             }
 
-            val originalPort = try {
-                TunnelConfig.parse(rawConfig).getServerPort()
-            } catch (_: Exception) { 51820 }
-
-            portRotator = PortRotator(originalPort)
-
-            val lastSuccessfulPort = settingsRepository.getLastSuccessfulPort().first()
-            val configToConnect = if (lastSuccessfulPort != 0 && lastSuccessfulPort != originalPort) {
-                Timber.d("VpnViewModel: trying persisted port $lastSuccessfulPort")
-                _activePort.value = lastSuccessfulPort
-                replaceEndpointPort(rawConfig, lastSuccessfulPort)
-            } else {
-                _activePort.value = null
-                rawConfig
-            }
-
-            // fix #3：通过 TunnelConnector 解析 split-tunnel 配置 — 与开机自启、
-            // Tile 路径完全一致。VpnViewModel 不再维护自己的副本。
-            // TunnelConnector 内部已处理：纯 WG 模式跳过服务器调用、V1→V2 迁移、
-            // admin preset 拉取、DNS 预解析。
+            // Resolve split-tunnel + network preferences via the single
+            // authoritative source (TunnelConnector) — same path used by
+            // BootReceiver, Tile, and Monitor-triggered reconnect.
             val serverUrl = setupRepository.getServerUrl()
             val splitConfig = tunnelConnector.resolveSplitTunnelConfig(serverUrl)
             lastSplitTunnelConfig = splitConfig
 
-            // 首次连接：失败后自动轮换端口重试，最多尝试5个候选端口
-            // 注意：这里直接调 tunnelManager.connect 而不是 tunnelConnector.connectWithUserSettings，
-            // 因为端口轮转需要细粒度控制连接失败后的重试。TunnelConnector 适合一次性连接，
-            // VpnViewModel 适合带重试的连接。两者共享同一份 splitConfig。
-            var connected = false
-            try {
-                tunnelManager.connect(configToConnect, splitConfig)
-                connected = true
-                Timber.d("VpnViewModel: tunnel connect requested")
-                if (!setupRepository.isWireGuardOnlyMode()) {
-                    reportDeviceHostname(serverUrl)
-                }
-            } catch (e: Exception) {
-                Timber.w(e, "VpnViewModel: initial connect failed, starting port rotation")
-            }
+            val persistedPort = settingsRepository.getLastSuccessfulPort().first()
+            val preferred = persistedPort.takeIf { it != 0 }
 
-            if (!connected) {
-                val rotator = portRotator ?: return@launch
-                val maxAttempts = minOf(rotator.candidateCount, 5)
-                for (attempt in 1..maxAttempts) {
-                    val nextPort = rotator.nextPort()
-                    Timber.d("VpnViewModel: retry attempt=$attempt port=$nextPort")
-                    val retryConfig = replaceEndpointPort(rawConfig, nextPort)
-                    try {
-                        tunnelManager.connect(retryConfig, splitConfig)
-                        _activePort.value = nextPort
-                        settingsRepository.saveSuccessfulPort(nextPort)
-                        Timber.i("VpnViewModel: connected on retry port=$nextPort")
-                        connected = true
-                        if (!setupRepository.isWireGuardOnlyMode()) {
-                            reportDeviceHostname(serverUrl)
-                        }
-                        break
-                    } catch (e: Exception) {
-                        Timber.w(e, "VpnViewModel: retry failed on port=$nextPort")
-                        delay(1_000L * attempt) // 递增等待：1s, 2s, 3s...
+            val outcome = portRotationCoordinator.connectWithRetry(
+                rawConfig = rawConfig,
+                splitConfig = splitConfig,
+                preferredFirstPort = preferred,
+            )
+            when (outcome) {
+                is PortRotationCoordinator.Outcome.Connected -> {
+                    if (!setupRepository.isWireGuardOnlyMode()) {
+                        reportDeviceHostname(serverUrl)
                     }
                 }
-                if (!connected) {
-                    Timber.e("VpnViewModel: all initial connect attempts failed")
+                is PortRotationCoordinator.Outcome.Failed,
+                is PortRotationCoordinator.Outcome.Exhausted -> {
+                    Timber.e("VpnViewModel: initial connect failed — outcome=$outcome")
                 }
+                PortRotationCoordinator.Outcome.NoConfig -> Unit
             }
         }
     }
@@ -260,61 +243,92 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // ── Port rotation ─────────────────────────────────────────────────────────
+    // ── Port rotation orchestration ─────────────────────────────────────────
 
-    private suspend fun reconnectWithPort(req: com.gatecontrol.android.tunnel.TunnelMonitor.ReconnectRequest) {
-        val port = req.suggestedPort
+    /**
+     * Entry point invoked by VpnForegroundService when [TunnelMonitor] emits
+     * a stall event. Re-resolves the latest split-tunnel + network preferences
+     * (they might have changed since [connect]), then asks the coordinator to
+     * reconnect, starting fresh from the persisted last-successful port.
+     *
+     * Toast is fired on failure so the user knows the auto-recovery failed —
+     * unlike the v1 behavior where reconnect failures were silent except in
+     * the log.
+     */
+    suspend fun handleMonitorStall() {
+        Timber.i("VpnViewModel: monitor reported stall — re-running connectWithRetry")
         val rawConfig = setupRepository.getWireGuardConfig()
-        if (rawConfig.isEmpty()) {
-            req.connectDone.complete(false)
-            return
-        }
+        if (rawConfig.isEmpty()) return
 
-        val configToUse = if (port != null) {
-            _activePort.value = port
-            replaceEndpointPort(rawConfig, port)
-        } else {
-            _activePort.value = null
-            rawConfig
-        }
+        // disconnect first so the new connect doesn't fight a half-alive
+        // tunnel — GoBackend gets unhappy with overlapping setState calls.
+        try { tunnelManager.disconnect() } catch (_: Exception) {}
+        delay(300L) // mirror the legacy "give VPN fd time to release" delay
 
-        try {
-            tunnelManager.connect(configToUse, lastSplitTunnelConfig)
-            Timber.d("VpnViewModel: reconnected on port ${port ?: "original"}")
-            if (port != null) {
-                settingsRepository.saveSuccessfulPort(port)
-                Timber.i("VpnViewModel: persisted successful port $port")
+        val serverUrl = setupRepository.getServerUrl()
+        val splitConfig = tunnelConnector.resolveSplitTunnelConfig(serverUrl)
+        lastSplitTunnelConfig = splitConfig
+
+        val persisted = settingsRepository.getLastSuccessfulPort().first().takeIf { it != 0 }
+        val outcome = portRotationCoordinator.connectWithRetry(
+            rawConfig = rawConfig,
+            splitConfig = splitConfig,
+            preferredFirstPort = persisted,
+        )
+        when (outcome) {
+            is PortRotationCoordinator.Outcome.Connected -> {
+                Timber.i("VpnViewModel: monitor-triggered reconnect succeeded port=${outcome.port}")
             }
-            // connect() 成功返回，通知 Monitor 可以查握手了
-            req.connectDone.complete(true)
-        } catch (e: Exception) {
-            Timber.e(e, "VpnViewModel: reconnect failed on port $port")
-            // connect() 失败，通知 Monitor 不必再等
-            req.connectDone.complete(false)
+            is PortRotationCoordinator.Outcome.Failed -> {
+                _toastMessages.tryEmit(ToastMessage.RECONNECT_FAILED)
+            }
+            is PortRotationCoordinator.Outcome.Exhausted -> {
+                _toastMessages.tryEmit(ToastMessage.RECONNECT_EXHAUSTED)
+            }
+            PortRotationCoordinator.Outcome.NoConfig -> Unit
         }
     }
 
-    internal fun replaceEndpointPort(config: String, port: Int): String =
-        config.lines().joinToString("\n") { line ->
-            val trimmed = line.trim()
-            if (trimmed.startsWith("Endpoint", ignoreCase = true) && trimmed.contains("=")) {
-                val eqIndex = line.indexOf('=')
-                val prefix = line.substring(0, eqIndex + 1)
-                val value = line.substring(eqIndex + 1).trim()
-                val hostPart = when {
-                    value.startsWith("[") -> value.substringBeforeLast(":")
-                    else -> value.substringBeforeLast(":")
-                }
-                "$prefix $hostPart:$port"
-            } else {
-                line
+    /**
+     * User-initiated "try a different port" — abandons the current port and
+     * runs the coordinator's retry loop. Unlike [connect], we do NOT prefer
+     * the persisted port (that's almost certainly the one the user wants to
+     * move away from).
+     */
+    fun manualRotatePort() {
+        viewModelScope.launch {
+            Timber.i("VpnViewModel: manual port rotate requested")
+            val rawConfig = setupRepository.getWireGuardConfig()
+            if (rawConfig.isEmpty()) return@launch
+
+            try { tunnelManager.disconnect() } catch (_: Exception) {}
+            delay(300L)
+
+            // Re-resolve in case the user changed settings since last connect.
+            val serverUrl = setupRepository.getServerUrl()
+            val splitConfig = tunnelConnector.resolveSplitTunnelConfig(serverUrl)
+            lastSplitTunnelConfig = splitConfig
+
+            // skipCurrent flags the coordinator to abandon the current port
+            // on its next iteration. It's a no-op if no sequence is in
+            // flight, which is fine — the next connectWithRetry call below
+            // is the one that does the actual work.
+            portRotationCoordinator.skipCurrent()
+
+            val outcome = portRotationCoordinator.connectWithRetry(
+                rawConfig = rawConfig,
+                splitConfig = splitConfig,
+                preferredFirstPort = null, // skip persisted — user wants new
+            )
+            when (outcome) {
+                is PortRotationCoordinator.Outcome.Connected -> Unit
+                else -> _toastMessages.tryEmit(ToastMessage.ROTATE_FAILED)
             }
         }
+    }
 
     private suspend fun resetPortState() {
-        _activePort.value = null
-        portRotator?.reset()
-        settingsRepository.clearSuccessfulPort()
+        portRotationCoordinator.resetPersistedPort()
         Timber.d("VpnViewModel: port state reset to original")
     }
 
@@ -341,29 +355,6 @@ class VpnViewModel @Inject constructor(
     }
 
     // ── 辅助功能 ──────────────────────────────────────────────────────────────
-
-    /**
-     * 用户手动触发端口轮换：取下一个候选端口立即重连，无需等待 TunnelMonitor 检测到握手超时。
-     * 仅在已连接状态下有效；未连接或 portRotator 未初始化时静默忽略。
-     */
-    fun manualRotatePort() {
-        val rotator = portRotator ?: return
-        viewModelScope.launch {
-            val nextPort = rotator.nextPort()
-            Timber.i("VpnViewModel: manual port rotate → $nextPort")
-            val rawConfig = setupRepository.getWireGuardConfig()
-            if (rawConfig.isEmpty()) return@launch
-            val configToUse = replaceEndpointPort(rawConfig, nextPort)
-            try {
-                tunnelManager.connect(configToUse, lastSplitTunnelConfig)
-                _activePort.value = nextPort
-                settingsRepository.saveSuccessfulPort(nextPort)
-                Timber.i("VpnViewModel: manual rotate connected on port=$nextPort")
-            } catch (e: Exception) {
-                Timber.e(e, "VpnViewModel: manual rotate failed on port=$nextPort")
-            }
-        }
-    }
 
     fun toggleKillSwitch(enabled: Boolean) {
         viewModelScope.launch {
