@@ -11,108 +11,66 @@ import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonToken
 import com.google.gson.stream.JsonWriter
 import dagger.hilt.android.qualifiers.ApplicationContext
-import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.net.InetAddress
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Builds Retrofit/OkHttp clients for the GateControl server API.
+ *
+ * ## v6.4: DNS resolution is delegated to [DnsResolver]
+ *
+ * Previously this class owned both a "vpn-safe DNS" filter and a
+ * pre-resolve cache. v6.4 moves all of that into [DnsResolver], which
+ * additionally supports:
+ *   - static host → IP overrides
+ *   - DoH upstream
+ *   - user-controlled cache TTL
+ *
+ * The resolver is a process-level singleton injected here as well as into
+ * Hilt-wired call sites; SettingsViewModel pushes config updates to it
+ * whenever the user changes a DNS preference.
+ */
 @Singleton
 class ApiClientProvider @Inject constructor(
     private val authInterceptor: AuthInterceptor,
-    @ApplicationContext private val context: Context
+    private val dnsResolver: DnsResolver,
+    @ApplicationContext private val context: Context,
 ) {
     private val cache = mutableMapOf<String, ApiClient>()
     private val lock = Any()
 
     /**
-     * DNS cache for VPN-safe resolution. When the VPN is active, Android's
-     * system DNS points to the VPN-internal resolver (10.8.0.1) but the
-     * GateControl app is excluded from the VPN (VpnService requirement).
-     * System DNS lookups fail with EAI_NODATA because 10.8.0.1 is unreachable
-     * outside the tunnel. We cache DNS results resolved BEFORE the VPN starts
-     * and fall back to the cache when system DNS fails.
-     */
-    private val dnsCache = ConcurrentHashMap<String, List<InetAddress>>()
-
-    /**
-     * Resolve and cache the server hostname. Safe to call from any thread.
-     * Re-resolves to pick up DNS changes, but rejects VPN-internal addresses
-     * (10.8.x.x) that appear when the tunnel's split-horizon DNS is active.
-     * Call clearDnsCache() on disconnect so the next connect starts fresh.
+     * Pre-warm the resolver's cache for [hostname] before the VPN starts.
+     * When the tunnel comes up, system DNS may start returning the
+     * VPN-internal resolver's view (10.8.x.x), which is unreachable from
+     * apps excluded from the tunnel (like this one). Pre-resolving while
+     * the underlying network is still in charge means [DnsResolver] has a
+     * cached answer to fall back on.
      */
     suspend fun preResolveDns(hostname: String) {
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val addresses = InetAddress.getAllByName(hostname)
-                if (addresses.isNotEmpty()) {
-                    // Reject VPN-internal addresses — when the tunnel is up,
-                    // system DNS may return the VPN gateway (10.8.0.1) instead
-                    // of the real public IP.
-                    val isVpnInternal = addresses.all { addr ->
-                        val ip = addr.hostAddress ?: ""
-                        ip.startsWith("10.8.")
-                    }
-                    if (isVpnInternal) {
-                        timber.log.Timber.d("DNS for $hostname returned VPN-internal address — keeping cache")
-                        return@withContext
-                    }
-
-                    val prev = dnsCache[hostname]?.map { it.hostAddress }
-                    dnsCache[hostname] = addresses.toList()
-                    val resolved = addresses.map { it.hostAddress }
-                    if (prev != null && prev != resolved) {
-                        timber.log.Timber.i("DNS changed for $hostname: $prev -> $resolved")
-                    } else {
-                        timber.log.Timber.d("DNS pre-resolved: $hostname -> $resolved")
-                    }
-                }
+                // Resolve via DnsResolver itself so the answer lands in its
+                // cache (subject to whether caching is enabled). The result
+                // is discarded; we only want the side effect.
+                dnsResolver.resolve(hostname)
+                timber.log.Timber.d("DNS pre-resolved %s via DnsResolver", hostname)
             } catch (e: Exception) {
-                if (dnsCache.containsKey(hostname)) {
-                    timber.log.Timber.d("DNS re-resolve failed for $hostname, keeping cached entry: ${e.message}")
-                } else {
-                    timber.log.Timber.w("DNS pre-resolve failed for $hostname: ${e.message}")
-                }
+                timber.log.Timber.w("DNS pre-resolve failed for %s: %s", hostname, e.message)
             }
         }
     }
 
-    /**
-     * Clear the DNS cache. Call on VPN disconnect so the next connect
-     * picks up any DNS changes that occurred while the tunnel was active.
-     */
+    /** Clear the resolver cache. Call on VPN disconnect. */
     fun clearDnsCache() {
-        dnsCache.clear()
+        dnsResolver.clearCache()
         timber.log.Timber.d("DNS cache cleared")
-    }
-
-    private val vpnSafeDns = object : Dns {
-        override fun lookup(hostname: String): List<InetAddress> {
-            // System DNS may return VPN-internal addresses (10.8.x.x) even
-            // when the GateControl app is excluded from the tunnel: Android
-            // caches the WG-internal resolver's answer system-wide. The app
-            // can't reach 10.8.0.1 from outside the tunnel, so OkHttp would
-            // hit SocketTimeout from the local Wi-Fi IP / ECONNREFUSED via
-            // VPN. Filter those out and prefer the pre-resolve cache,
-            // which preResolveDns() guarantees never holds 10.8.x.x.
-            val systemResults = try {
-                Dns.SYSTEM.lookup(hostname).filter { addr ->
-                    val ip = addr.hostAddress ?: ""
-                    !ip.startsWith("10.8.")
-                }
-            } catch (_: Exception) {
-                emptyList()
-            }
-            if (systemResults.isNotEmpty()) return systemResults
-            return dnsCache[hostname] ?: throw java.net.UnknownHostException(
-                "DNS lookup failed for $hostname (system DNS returned only VPN-internal addresses, no cache)"
-            )
-        }
     }
 
     fun getClient(baseUrl: String): ApiClient {
@@ -137,7 +95,7 @@ class ApiClientProvider @Inject constructor(
         }
 
         val okHttpClient = OkHttpClient.Builder()
-            .dns(vpnSafeDns)
+            .dns(dnsResolver.asOkHttpDns)
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
             .connectTimeout(15, TimeUnit.SECONDS)
