@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.35] - 2026-06-13
+
+### Changes
+- 更新 SplitTunnelScreen.kt
+
+---
+
 ## [1.6.32] - 2026-06-13
 
 ### Changes
