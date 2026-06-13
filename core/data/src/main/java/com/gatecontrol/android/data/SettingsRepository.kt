@@ -37,6 +37,10 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
         val IP_PROTOCOL = stringPreferencesKey("ip_protocol")
         val DNS_PRIMARY = stringPreferencesKey("dns_primary")
         val DNS_SECONDARY = stringPreferencesKey("dns_secondary")
+        // v6.2: lets the user disable file logging from Settings. Default
+        // is true (logging on) so behavior matches pre-v6.2. Logcat output
+        // (Timber.DebugTree) is unaffected — only FileLoggingTree honors it.
+        val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")
     }
 
     fun getTheme(): Flow<String> = dataStore.data.map { it[THEME] ?: "system" }
@@ -201,6 +205,18 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
 
     suspend fun setDnsSecondary(value: String) {
         dataStore.edit { it[DNS_SECONDARY] = value.trim() }
+    }
+
+    // ── Logging toggle (v6.2) ─────────────────────────────────────────────
+    // FileLoggingTree honors this flag via a @Volatile read on every log line;
+    // when off, file writes are skipped entirely. Logcat (Timber.DebugTree on
+    // debuggable builds) is unaffected.
+
+    fun getLoggingEnabled(): Flow<Boolean> =
+        dataStore.data.map { it[LOGGING_ENABLED] ?: true }
+
+    suspend fun setLoggingEnabled(value: Boolean) {
+        dataStore.edit { it[LOGGING_ENABLED] = value }
     }
 
     // ── Port rotation（内存持有，不写 DataStore）─────────────────────────────
