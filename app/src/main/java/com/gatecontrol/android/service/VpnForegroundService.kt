@@ -229,11 +229,18 @@ class VpnForegroundService : VpnService() {
         // the coordinator. The coordinator is the single source of truth for
         // port state, so the same flow works whether the ViewModel is alive
         // (UI in foreground) or not (Doze, screen-off, etc.).
+        //
+        // v6.2: we use `first()` rather than `collect { }` because the monitor
+        // emits at most ONE stall event before stopping itself. Using collect
+        // and then calling startTunnelMonitor() inside the lambda would
+        // self-cancel the current collect job (stopMonitor cancels monitorJob,
+        // and we ARE monitorJob), throwing a stray CancellationException.
+        // Taking the single event and exiting cleanly lets the next
+        // startTunnelMonitor() reach steady state without self-cancel.
         monitorJob = serviceScope.launch {
-            monitor.stallEvents.collect { event ->
-                Timber.i("VpnForegroundService: monitor stall reason=${event.reason}")
-                handleMonitorStall()
-            }
+            val event = monitor.stallEvents.first()
+            Timber.i("VpnForegroundService: monitor stall reason=${event.reason}")
+            handleMonitorStall()
         }
 
         Timber.d("VpnForegroundService: TunnelMonitor started")
