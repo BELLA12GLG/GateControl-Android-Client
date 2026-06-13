@@ -95,16 +95,6 @@ data class DnsCheckResponse(
     val gatewayIp: String
 )
 
-data class UpdateCheckResponse(
-    val ok: Boolean,
-    val available: Boolean,
-    val version: String?,
-    val downloadUrl: String?,
-    val fileName: String?,
-    val fileSize: Long?,
-    val releaseNotes: String?
-)
-
 // --- Split Tunnel ---
 
 data class SplitTunnelNetwork(
