@@ -59,7 +59,11 @@ data class SettingsUiState(
     val error: String? = null,
     val success: String? = null,
     val isPro: Boolean = false,
-    val licenseStatus: String = ""
+    val licenseStatus: String = "",
+    // Network preferences (v4.7)
+    val ipProtocol: String = "auto",
+    val dnsPrimary: String = "",
+    val dnsSecondary: String = "",
 )
 
 @HiltViewModel
@@ -151,6 +155,23 @@ class SettingsViewModel @Inject constructor(
             }
         }
 
+        // Network preferences (v4.7)
+        viewModelScope.launch {
+            settingsRepository.getIpProtocol().collect { proto ->
+                _uiState.update { it.copy(ipProtocol = proto) }
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.getDnsPrimary().collect { addr ->
+                _uiState.update { it.copy(dnsPrimary = addr) }
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.getDnsSecondary().collect { addr ->
+                _uiState.update { it.copy(dnsSecondary = addr) }
+            }
+        }
+
         _uiState.update {
             it.copy(
                 serverUrl = setupRepository.getServerUrl(),
@@ -184,6 +205,29 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             settingsRepository.setKillSwitch(enabled)
             _uiState.update { it.copy(killSwitch = enabled) }
+        }
+    }
+
+    // ── Network preferences (v4.7) ─────────────────────────────────────────
+
+    fun setIpProtocol(value: String) {
+        viewModelScope.launch {
+            settingsRepository.setIpProtocol(value)
+            _uiState.update { it.copy(ipProtocol = value) }
+        }
+    }
+
+    fun setDnsPrimary(value: String) {
+        viewModelScope.launch {
+            settingsRepository.setDnsPrimary(value)
+            _uiState.update { it.copy(dnsPrimary = value.trim()) }
+        }
+    }
+
+    fun setDnsSecondary(value: String) {
+        viewModelScope.launch {
+            settingsRepository.setDnsSecondary(value)
+            _uiState.update { it.copy(dnsSecondary = value.trim()) }
         }
     }
 
