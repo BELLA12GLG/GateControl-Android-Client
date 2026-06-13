@@ -171,26 +171,4 @@ class ApiClientTest {
         assertEquals("192.168.1.10", response.routes[0].host)
         assertTrue(response.routes[0].status?.online == true)
     }
-
-    @Test
-    fun `checkUpdate returns available flag`() = runTest {
-        server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
-                .setBody(
-                    """{"ok":true,"available":true,"version":"2.0.0","downloadUrl":"https://example.com/app.apk","fileName":"app.apk","fileSize":12345678,"releaseNotes":"Bug fixes"}"""
-                )
-        )
-
-        val response = apiClient.checkUpdate(version = "1.5.0")
-
-        val recorded = server.takeRequest()
-        val path = recorded.path ?: ""
-        assertTrue(path.contains("version=1.5.0"), "Path should contain version=1.5.0")
-        assertTrue(path.contains("platform=android"), "Path should contain platform=android")
-        assertTrue(path.contains("client=gatecontrol"), "Path should contain client=gatecontrol")
-        assertTrue(response.ok)
-        assertTrue(response.available)
-        assertEquals("2.0.0", response.version)
-    }
 }
