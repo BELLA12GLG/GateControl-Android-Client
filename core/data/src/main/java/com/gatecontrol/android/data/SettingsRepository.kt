@@ -29,6 +29,14 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
         val SPLIT_TUNNEL_ADMIN_LOCKED = booleanPreferencesKey("split_tunnel_admin_locked")
         val CHECK_INTERVAL = intPreferencesKey("check_interval")
         val CONFIG_POLL_INTERVAL = intPreferencesKey("config_poll_interval")
+        // Network preferences (v4.7)
+        // IP_PROTOCOL — one of: "auto" (default, IPv4-preferred dual-stack),
+        //   "ipv6_preferred", "ipv4_only", "ipv6_only".
+        // DNS_PRIMARY / DNS_SECONDARY — empty string means "use system DNS".
+        //   When non-empty, must be a valid IPv4 or IPv6 address.
+        val IP_PROTOCOL = stringPreferencesKey("ip_protocol")
+        val DNS_PRIMARY = stringPreferencesKey("dns_primary")
+        val DNS_SECONDARY = stringPreferencesKey("dns_secondary")
     }
 
     fun getTheme(): Flow<String> = dataStore.data.map { it[THEME] ?: "system" }
@@ -164,6 +172,35 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
     suspend fun setConfigPollInterval(value: Int) {
         val clamped = value.coerceIn(30, 3600)
         dataStore.edit { it[CONFIG_POLL_INTERVAL] = clamped }
+    }
+
+    // ── Network preferences (v4.7) ─────────────────────────────────────────
+    // IP_PROTOCOL accepted values: "auto", "ipv6_preferred", "ipv4_only", "ipv6_only".
+    // "auto" matches the legacy behavior (IPv4-preferred dual stack).
+
+    fun getIpProtocol(): Flow<String> =
+        dataStore.data.map { it[IP_PROTOCOL] ?: "auto" }
+
+    suspend fun setIpProtocol(value: String) {
+        val allowed = setOf("auto", "ipv6_preferred", "ipv4_only", "ipv6_only")
+        val normalized = if (value in allowed) value else "auto"
+        dataStore.edit { it[IP_PROTOCOL] = normalized }
+    }
+
+    // Empty string means "use system DNS". Tunnel layer is responsible for
+    // applying these via wg-quick's DNS= field or VpnService.Builder.addDnsServer.
+    fun getDnsPrimary(): Flow<String> =
+        dataStore.data.map { it[DNS_PRIMARY] ?: "" }
+
+    fun getDnsSecondary(): Flow<String> =
+        dataStore.data.map { it[DNS_SECONDARY] ?: "" }
+
+    suspend fun setDnsPrimary(value: String) {
+        dataStore.edit { it[DNS_PRIMARY] = value.trim() }
+    }
+
+    suspend fun setDnsSecondary(value: String) {
+        dataStore.edit { it[DNS_SECONDARY] = value.trim() }
     }
 
     // ── Port rotation（内存持有，不写 DataStore）─────────────────────────────
