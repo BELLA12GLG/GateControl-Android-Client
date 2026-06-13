@@ -235,11 +235,22 @@ class TunnelManager @Inject constructor(private val context: Context) {
         parsed: TunnelConfig,
         splitConfig: SplitTunnelConfig,
     ): Config {
+        // Effective DNS list:
+        //   1. If user supplied DNS overrides, use those.
+        //   2. Otherwise use whatever the WG config specified.
+        // Then filter by IP-family if user picked "ipv4_only" / "ipv6_only".
+        val rawDns = if (splitConfig.dnsServers.isNotEmpty()) {
+            splitConfig.dnsServers
+        } else {
+            parsed.dns
+        }
+        val effectiveDns = NetworkPrefsHelpers.filterDnsByProtocol(rawDns, splitConfig.ipProtocol)
+
         val ifaceBuilder = Interface.Builder()
             .parsePrivateKey(parsed.privateKey)
             .parseAddresses(parsed.address)
 
-        parsed.dns.forEach { dns ->
+        effectiveDns.forEach { dns ->
             ifaceBuilder.parseDnsServers(dns)
         }
         parsed.mtu?.let { ifaceBuilder.setMtu(it) }
@@ -259,15 +270,24 @@ class TunnelManager @Inject constructor(private val context: Context) {
             // "off" — no app filtering
         }
 
+        // Endpoint resolution honoring IP-family preference.
+        //
+        // The WireGuard library (parseEndpoint) accepts "host:port" and does
+        // its own DNS resolution internally — but it has no concept of
+        // "IPv6 only". To enforce an IP family we pre-resolve the host
+        // ourselves, pick the right address, and pass the literal IP back.
+        // For "auto" we leave the original string so behavior is unchanged.
+        val effectiveEndpoint = resolveEndpoint(parsed.endpoint, splitConfig.ipProtocol)
+
         val peerBuilder = Peer.Builder()
             .parsePublicKey(parsed.publicKey)
-            .parseEndpoint(parsed.endpoint)
+            .parseEndpoint(effectiveEndpoint)
 
         parsed.presharedKey?.let { peerBuilder.parsePreSharedKey(it) }
         parsed.persistentKeepalive?.let { peerBuilder.setPersistentKeepalive(it) }
 
         // DNS IPs as /32 (or /128 for IPv6) — always included to prevent DNS leaks
-        val dnsIps = parsed.dns.map { it.trim() }
+        val dnsIps = effectiveDns.map { it.trim() }
             .filter { it.isNotEmpty() }
             .map { if (it.contains(":")) "$it/128" else "$it/32" }
 
@@ -275,23 +295,25 @@ class TunnelManager @Inject constructor(private val context: Context) {
             "exclude" -> {
                 if (splitConfig.networks.isEmpty()) {
                     // No networks excluded — full tunnel (use original AllowedIPs)
-                    parsed.allowedIps
+                    NetworkPrefsHelpers.filterAllowedIpsByProtocol(parsed.allowedIps, splitConfig.ipProtocol)
                 } else {
                     // Compute complement: 0.0.0.0/0 minus excluded networks (IPv4)
                     val complement = CidrComplement.computeAllowedIps(splitConfig.networks)
                     // Always include ::/0 to prevent IPv6 leaks — exclude mode means
                     // "everything through VPN except these networks", so IPv6 must also
                     // be tunneled. Also add DNS + VPN subnet to prevent DNS leaks.
-                    (complement + listOf("::/0") + dnsIps + VPN_SUBNET).distinct().joinToString(",")
+                    val combined = (complement + listOf("::/0") + dnsIps + VPN_SUBNET).distinct()
+                    NetworkPrefsHelpers.filterCidrsByProtocol(combined, splitConfig.ipProtocol).joinToString(",")
                 }
             }
             "include" -> {
                 // Only route specified networks + DNS + VPN subnet
-                (splitConfig.networks + dnsIps + VPN_SUBNET).distinct().joinToString(",")
+                val combined = (splitConfig.networks + dnsIps + VPN_SUBNET).distinct()
+                NetworkPrefsHelpers.filterCidrsByProtocol(combined, splitConfig.ipProtocol).joinToString(",")
             }
             else -> {
                 // Off — use original AllowedIPs from WG config
-                parsed.allowedIps
+                NetworkPrefsHelpers.filterAllowedIpsByProtocol(parsed.allowedIps, splitConfig.ipProtocol)
             }
         }
         peerBuilder.parseAllowedIPs(allowedIpsRaw)
@@ -300,6 +322,51 @@ class TunnelManager @Inject constructor(private val context: Context) {
             .setInterface(ifaceBuilder.build())
             .addPeer(peerBuilder.build())
             .build()
+    }
+
+    /**
+     * Resolve the WireGuard endpoint "host:port" honoring [ipProtocol].
+     *
+     * - "auto": return [original] unchanged — let WireGuard / Android pick.
+     * - "ipv6_preferred": resolve [original] and pick the first IPv6 address;
+     *   fall back to IPv4 if no IPv6 reachable.
+     * - "ipv4_only": resolve and reject if no IPv4 found.
+     * - "ipv6_only": resolve and reject if no IPv6 found.
+     *
+     * On any resolution failure we fall back to the original string so the
+     * WireGuard library still has a chance — better to attempt connect than
+     * fail before we ever sent a packet.
+     */
+    private fun resolveEndpoint(original: String, ipProtocol: String): String {
+        if (ipProtocol == "auto") return original
+        // Parse host and port — endpoint may be host:port, [v6]:port, or v6:port (rare).
+        val (host, port) = NetworkPrefsHelpers.splitHostPort(original) ?: return original
+
+        return try {
+            val addresses = InetAddress.getAllByName(host).toList()
+            val v6 = addresses.filterIsInstance<java.net.Inet6Address>()
+            val v4 = addresses.filterIsInstance<java.net.Inet4Address>()
+
+            val picked: InetAddress? = when (ipProtocol) {
+                "ipv4_only" -> v4.firstOrNull()
+                "ipv6_only" -> v6.firstOrNull()
+                "ipv6_preferred" -> v6.firstOrNull() ?: v4.firstOrNull()
+                else -> null
+            }
+            if (picked == null) {
+                Timber.w(
+                    "Endpoint %s has no address matching protocol=%s — using original",
+                    host, ipProtocol,
+                )
+                return original
+            }
+            val ipString = picked.hostAddress ?: return original
+            // Bracket IPv6 in the endpoint string so parseEndpoint splits correctly.
+            if (picked is java.net.Inet6Address) "[$ipString]:$port" else "$ipString:$port"
+        } catch (e: Exception) {
+            Timber.w(e, "Endpoint resolve failed for %s, falling back to original", host)
+            original
+        }
     }
 
     companion object {
