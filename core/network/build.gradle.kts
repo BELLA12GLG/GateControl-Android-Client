@@ -47,6 +47,7 @@ dependencies {
     implementation(libs.retrofit.gson)
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+    implementation(libs.okhttp.dnsoverhttps)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
     implementation(libs.timber)
