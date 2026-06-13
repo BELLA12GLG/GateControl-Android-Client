@@ -22,7 +22,10 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class TunnelManager @Inject constructor(private val context: Context) {
+class TunnelManager @Inject constructor(
+    private val context: Context,
+    private val dnsResolver: com.gatecontrol.android.network.DnsResolver,
+) {
 
     private val _state = MutableStateFlow<TunnelState>(TunnelState.Disconnected)
     val state: StateFlow<TunnelState> = _state.asStateFlow()
@@ -296,7 +299,7 @@ class TunnelManager @Inject constructor(private val context: Context) {
         // "IPv6 only". To enforce an IP family we pre-resolve the host
         // ourselves, pick the right address, and pass the literal IP back.
         // For "auto" we leave the original string so behavior is unchanged.
-        val effectiveEndpoint = resolveEndpoint(parsed.endpoint, splitConfig.ipProtocol)
+        val effectiveEndpoint = resolveEndpoint(parsed.endpoint, splitConfig)
 
         val peerBuilder = Peer.Builder()
             .parsePublicKey(parsed.publicKey)
@@ -370,13 +373,48 @@ class TunnelManager @Inject constructor(private val context: Context) {
      * WireGuard library still has a chance — better to attempt connect than
      * fail before we ever sent a packet.
      */
-    private fun resolveEndpoint(original: String, ipProtocol: String): String {
-        if (ipProtocol == "auto") return original
+    private fun resolveEndpoint(original: String, splitConfig: SplitTunnelConfig): String {
+        val ipProtocol = splitConfig.ipProtocol
         // Parse host and port — endpoint may be host:port, [v6]:port, or v6:port (rare).
         val (host, port) = NetworkPrefsHelpers.splitHostPort(original) ?: return original
 
+        // v6.5: static host override has highest priority — short-circuit
+        // before even consulting InetAddress. Lets the user connect when
+        // system DNS is blocked / poisoned.
+        val staticHostHit = splitConfig.staticHosts[host.lowercase()]
+        if (staticHostHit != null) {
+            return try {
+                val addr = InetAddress.getByName(staticHostHit)
+                val ipString = addr.hostAddress ?: return original
+                if (addr is java.net.Inet6Address) "[$ipString]:$port" else "$ipString:$port"
+            } catch (e: Exception) {
+                Timber.w(
+                    e,
+                    "Static host override for %s -> %s is not a valid IP, falling back",
+                    host,
+                    staticHostHit,
+                )
+                original
+            }
+        }
+
+        if (ipProtocol == "auto") return original
+
         return try {
-            val addresses = InetAddress.getAllByName(host).toList()
+            // v6.5: use the app-layer DnsResolver instead of raw
+            // InetAddress.getAllByName. This gives the tunnel:
+            //   - the static-hosts overrides (already handled above, but
+            //     defense-in-depth in case the SplitTunnelConfig path
+            //     ever fails to populate them)
+            //   - the DNS cache (faster repeat reconnects)
+            //   - the configured DoH upstream (DNS via DoH for the very
+            //     first connect, when system DNS may be hostile)
+            val addresses = try {
+                dnsResolver.resolve(host)
+            } catch (e: Exception) {
+                Timber.w(e, "DnsResolver failed for %s, falling back to InetAddress", host)
+                InetAddress.getAllByName(host).toList()
+            }
             val v6 = addresses.filterIsInstance<java.net.Inet6Address>()
             val v4 = addresses.filterIsInstance<java.net.Inet4Address>()
 
