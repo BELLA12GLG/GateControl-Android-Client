@@ -84,11 +84,4 @@ interface ApiClient {
 
     @GET("api/v1/client/rdp/{id}/status")
     suspend fun getRdpRouteStatus(@Path("id") routeId: Int): RdpRouteStatusResponse
-
-    @GET("api/v1/client/update/check")
-    suspend fun checkUpdate(
-        @Query("version") version: String,
-        @Query("platform") platform: String = "android",
-        @Query("client") client: String = "gatecontrol"
-    ): UpdateCheckResponse
 }
