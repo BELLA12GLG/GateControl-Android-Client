@@ -41,6 +41,16 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
         // is true (logging on) so behavior matches pre-v6.2. Logcat output
         // (Timber.DebugTree) is unaffected — only FileLoggingTree honors it.
         val LOGGING_ENABLED = booleanPreferencesKey("logging_enabled")
+        // v6.4: App-layer DNS resolution preferences
+        // STATIC_HOSTS_JSON: JSON-encoded Map<String, String> of host → IP.
+        //   Empty string = "{}" = no static entries.
+        // DOH_UPSTREAM_URL: e.g. "https://1.1.1.1/dns-query" — empty = system DNS.
+        // DNS_CACHE_ENABLED / DNS_CACHE_TTL_SECONDS: per-host result cache in
+        //   OkHttp Dns. TTL is the user-controlled global, not DNS-record TTL.
+        val STATIC_HOSTS_JSON = stringPreferencesKey("static_hosts_json")
+        val DOH_UPSTREAM_URL = stringPreferencesKey("doh_upstream_url")
+        val DNS_CACHE_ENABLED = booleanPreferencesKey("dns_cache_enabled")
+        val DNS_CACHE_TTL_SECONDS = intPreferencesKey("dns_cache_ttl_seconds")
     }
 
     fun getTheme(): Flow<String> = dataStore.data.map { it[THEME] ?: "system" }
@@ -217,6 +227,46 @@ class SettingsRepository @Inject constructor(private val dataStore: DataStore<Pr
 
     suspend fun setLoggingEnabled(value: Boolean) {
         dataStore.edit { it[LOGGING_ENABLED] = value }
+    }
+
+    // ── App-layer DNS preferences (v6.4) ──────────────────────────────────
+    // These control how the App's OkHttp REST calls resolve hostnames.
+    // They are SEPARATE from the WireGuard tunnel DNS (DNS_PRIMARY/SECONDARY).
+
+    /** JSON-encoded Map<String, String> of static host → IP entries. */
+    fun getStaticHostsJson(): Flow<String> =
+        dataStore.data.map { it[STATIC_HOSTS_JSON] ?: "{}" }
+
+    suspend fun setStaticHostsJson(json: String) {
+        dataStore.edit { it[STATIC_HOSTS_JSON] = json }
+    }
+
+    /** DoH endpoint URL, e.g. "https://1.1.1.1/dns-query". Empty = system DNS. */
+    fun getDohUpstreamUrl(): Flow<String> =
+        dataStore.data.map { it[DOH_UPSTREAM_URL] ?: "" }
+
+    suspend fun setDohUpstreamUrl(url: String) {
+        dataStore.edit { it[DOH_UPSTREAM_URL] = url.trim() }
+    }
+
+    /** Whether the app caches DNS results. Default true. */
+    fun getDnsCacheEnabled(): Flow<Boolean> =
+        dataStore.data.map { it[DNS_CACHE_ENABLED] ?: true }
+
+    suspend fun setDnsCacheEnabled(value: Boolean) {
+        dataStore.edit { it[DNS_CACHE_ENABLED] = value }
+    }
+
+    /** Cache TTL in seconds. Default 3600 (1 hour). User-selectable presets:
+     *  300 (5 min), 1800 (30 min), 3600 (1 hour), 21600 (6 hour). */
+    fun getDnsCacheTtlSeconds(): Flow<Int> =
+        dataStore.data.map { it[DNS_CACHE_TTL_SECONDS] ?: 3600 }
+
+    suspend fun setDnsCacheTtlSeconds(value: Int) {
+        // Clamp to a sane range — the UI presents 4 fixed options but we
+        // accept anything in [60, 86400] (1 min - 1 day) for forward compat.
+        val clamped = value.coerceIn(60, 86_400)
+        dataStore.edit { it[DNS_CACHE_TTL_SECONDS] = clamped }
     }
 
     // ── Port rotation（内存持有，不写 DataStore）─────────────────────────────
