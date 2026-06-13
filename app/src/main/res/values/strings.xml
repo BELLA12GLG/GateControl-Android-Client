@@ -183,11 +183,6 @@
     <string name="settings_logs_export">Export Logs</string>
     <string name="settings_about">About</string>
     <string name="settings_version">Version %1$s</string>
-    <string name="settings_update_available">Update available: %1$s</string>
-    <string name="settings_update_install">Install</string>
-    <string name="settings_update_later">Later</string>
-    <string name="settings_update_none">No updates available</string>
-    <string name="settings_check_for_updates">Check for Updates</string>
 
     <!-- Setup -->
     <string name="setup_title">Connect to GateControl</string>
@@ -212,14 +207,11 @@
 
     <!-- Notifications -->
     <string name="notif_channel_vpn">VPN Status</string>
-    <string name="notif_channel_update">Updates</string>
     <string name="notif_channel_rdp">RDP Sessions</string>
     <string name="notif_vpn_connected">Connected to %1$s</string>
     <string name="notif_vpn_disconnected">VPN Disconnected</string>
     <string name="notif_vpn_reconnecting">Reconnecting&#8230;</string>
     <string name="notif_vpn_stats">&#8595; %1$s · &#8593; %2$s · %3$s</string>
-    <string name="notif_update_title">Update Available</string>
-    <string name="notif_update_body">Version %1$s is available</string>
     <string name="notif_peer_expiry">Peer expires in %1$d days</string>
     <string name="notif_peer_expired">Peer has expired</string>
     <string name="peer_disabled_by_server">VPN access has been disabled by the server. Disconnected.</string>
@@ -298,6 +290,29 @@
     <string name="dns_invalid">Not a valid IPv4 or IPv6 address</string>
     <string name="dns_presets_header">Presets</string>
     <string name="dns_preset_system">System default</string>
+
+    <!-- App-layer DNS (v6.4) -->
+    <string name="dns_app_doh_header">App DNS (DoH)</string>
+    <string name="dns_app_doh_footer">DNS-over-HTTPS endpoint used by the GateControl app to resolve the server hostname. This does NOT change the DNS that runs through your VPN tunnel.</string>
+    <string name="dns_app_doh_url_label">DoH URL</string>
+    <string name="dns_app_doh_presets_header">DoH Presets</string>
+    <string name="dns_static_hosts_header">Static hosts</string>
+    <string name="dns_static_hosts_footer">Pin a hostname to a specific IP. Takes priority over DoH and system DNS. Useful when the server hostname is DNS-poisoned or unresolvable.</string>
+    <string name="dns_static_hosts_empty">No static entries</string>
+    <string name="dns_static_hosts_add">Add entry</string>
+    <string name="dns_static_hosts_add_title">Add static host</string>
+    <string name="dns_static_hosts_host_label">Hostname</string>
+    <string name="dns_static_hosts_ip_label">IP address</string>
+    <string name="dns_static_hosts_duplicate">A static entry for this hostname already exists</string>
+    <string name="dns_static_hosts_remove">Remove</string>
+    <string name="dns_cache_header">DNS cache</string>
+    <string name="dns_cache_footer">App-layer cache for DNS results. Faster reconnects, fewer DNS lookups. Does not affect the VPN tunnel.</string>
+    <string name="dns_cache_enabled_label">Enable cache</string>
+    <string name="dns_cache_ttl_5m">5 minutes</string>
+    <string name="dns_cache_ttl_30m">30 minutes</string>
+    <string name="dns_cache_ttl_1h">1 hour</string>
+    <string name="dns_cache_ttl_6h">6 hours</string>
+    <string name="dns_cache_clear">Clear cache now</string>
     <!-- App picker enhancements -->
     <string name="split_tunnel_pick_apps">Choose apps</string>
     <string name="split_tunnel_selected_header">Selected (%1$d)</string>
