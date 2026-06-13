@@ -12,6 +12,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.android.HiltAndroidApp
 import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.io.File
 import java.io.PrintWriter
@@ -53,6 +54,21 @@ class GateControlApp : Application() {
             val entryPoint = EntryPointAccessors.fromApplication(this, TileEntryPoint::class.java)
             TunnelStateHolder.tunnelManager = entryPoint.tunnelManager()
             TunnelStateHolder.setupRepository = entryPoint.setupRepository()
+
+            // v6.2: pick up the persisted "file logging" toggle and apply it
+            // to the planted FileLoggingTree. Default is true so first launch
+            // (no preference set) keeps the previous behavior.
+            //
+            // Done on a background dispatcher because DataStore reads suspend
+            // on the IO pool. We don't block app startup waiting for the
+            // first emission — if a log line happens before this completes,
+            // the default of `enabled = true` writes it as before.
+            val settingsRepo = entryPoint.settingsRepository()
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                settingsRepo.getLoggingEnabled().collect { on ->
+                    FileLoggingTree.setEnabled(on)
+                }
+            }
         } catch (e: Throwable) {
             Timber.e(e, "Failed to register TunnelStateHolder singletons")
         }
@@ -82,6 +98,7 @@ class GateControlApp : Application() {
     interface TileEntryPoint {
         fun tunnelManager(): TunnelManager
         fun setupRepository(): SetupRepository
+        fun settingsRepository(): com.gatecontrol.android.data.SettingsRepository
     }
 
     private fun installCrashLogger(context: Context) {
