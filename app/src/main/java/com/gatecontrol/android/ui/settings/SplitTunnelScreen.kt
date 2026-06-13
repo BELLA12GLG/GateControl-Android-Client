@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Icon
@@ -175,7 +176,7 @@ fun SplitTunnelScreen(
                                 viewModel.setSplitTunnelAppsV2(uiState.splitTunnelAppsV2 - pkg)
                             }) {
                                 Icon(
-                                    imageVector = androidx.compose.material.icons.Icons.Filled.Close,
+                                    imageVector = Icons.Filled.Close,
                                     contentDescription = null,
                                     tint = GateControlTheme.extraColors.text3,
                                 )
@@ -323,7 +324,7 @@ private fun NetworkPresetRows(
                     onNetworksChanged(networks - entry)
                 }) {
                     Icon(
-                        imageVector = androidx.compose.material.icons.Icons.Filled.Close,
+                        imageVector = Icons.Filled.Close,
                         contentDescription = null,
                         tint = GateControlTheme.extraColors.text3,
                     )
