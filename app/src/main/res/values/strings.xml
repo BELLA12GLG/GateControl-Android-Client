@@ -204,6 +204,7 @@
     <string name="logs_empty">No logs available</string>
     <string name="logs_refresh">Refresh</string>
     <string name="logs_export">Export</string>
+    <string name="logs_export_failed">Log export failed</string>
 
     <!-- Notifications -->
     <string name="notif_channel_vpn">VPN Status</string>
