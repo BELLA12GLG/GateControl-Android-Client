@@ -92,6 +92,11 @@ class PortRotationCoordinator @Inject constructor(
      * @param preferredFirstPort if non-null, try this port first instead of
      *   the original. Used by initial-connect to retry a previously-known
      *   working port without re-discovering it.
+     * @param excludePorts ports the caller wants to skip entirely — typically
+     *   the port the user just rotated AWAY from. Seeded into the history
+     *   set so [PortStrategy] never suggests them, AND used to override
+     *   [preferredFirstPort] / [originalPort] fall-back: if either is in
+     *   this set, we skip straight to PortStrategy candidates.
      *
      * @return [Outcome] describing whether we connected, on which port, or
      *   ran out of attempts. Never throws; failures are reported via Outcome
@@ -102,6 +107,7 @@ class PortRotationCoordinator @Inject constructor(
         splitConfig: SplitTunnelConfig,
         maxAttempts: Int = 8,
         preferredFirstPort: Int? = null,
+        excludePorts: Set<Int> = emptySet(),
     ): Outcome = mutex.withLock {
         skipRequested = false
 
@@ -116,23 +122,37 @@ class PortRotationCoordinator @Inject constructor(
             51820
         }
 
-        // History of ports tried this sequence. Strategy guarantees it never
-        // re-suggests one already here.
-        val history = mutableSetOf<Int>()
+        // History seeded with excludePorts so the strategy and the
+        // fall-back-to-original logic both treat them as "already tried".
+        val history = excludePorts.toMutableSet()
         var attempt = 0
 
         // ── Attempt 1: preferred-first or original port ──────────────────
-        val firstPort = preferredFirstPort ?: originalPort
-        attempt++
-        if (tryPort(rawConfig, splitConfig, firstPort, attempt, maxAttempts)) {
-            persistSuccess(firstPort, originalPort)
-            return@withLock Outcome.Connected(firstPort)
+        // If the preferred port is in excludePorts (e.g. user manually
+        // rotated away from it), skip the preferred and try original.
+        // If original is ALSO excluded, skip straight to PortStrategy.
+        val firstPort = when {
+            preferredFirstPort != null && preferredFirstPort !in excludePorts ->
+                preferredFirstPort
+            originalPort !in excludePorts -> originalPort
+            else -> null  // both excluded, jump to strategy
         }
-        history += firstPort
-        // If the preferred-first wasn't the original, fall back to original on
-        // attempt 2 before going random — original might just have been a
-        // momentary blip.
-        if (preferredFirstPort != null && preferredFirstPort != originalPort) {
+        if (firstPort != null) {
+            attempt++
+            if (tryPort(rawConfig, splitConfig, firstPort, attempt, maxAttempts)) {
+                persistSuccess(firstPort, originalPort)
+                return@withLock Outcome.Connected(firstPort)
+            }
+            history += firstPort
+        }
+        // If the preferred-first wasn't the original AND original isn't
+        // excluded, fall back to original on next attempt before going
+        // random — original might just have been a momentary blip.
+        if (preferredFirstPort != null
+            && preferredFirstPort != originalPort
+            && originalPort !in excludePorts
+            && originalPort !in history
+        ) {
             attempt++
             if (attempt <= maxAttempts) {
                 if (tryPort(rawConfig, splitConfig, originalPort, attempt, maxAttempts)) {
