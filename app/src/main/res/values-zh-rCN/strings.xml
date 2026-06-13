@@ -33,6 +33,10 @@
     <string name="vpn_state_connecting">正在连接…</string>
     <string name="vpn_state_disconnected">未连接</string>
     <string name="vpn_state_connecting_subtitle">正在建立隧道</string>
+    <string name="vpn_state_connecting_attempt">正在尝试端口 %1$d(%2$d/%3$d)…</string>
+    <string name="vpn_toast_reconnect_failed">自动重连失败,请检查网络</string>
+    <string name="vpn_toast_reconnect_exhausted">自动重连:所有端口都已尝试</string>
+    <string name="vpn_toast_rotate_failed">切换端口失败</string>
     <string name="vpn_state_disconnected_subtitle">点击连接</string>
     <string name="vpn_section_connection">连接</string>
     <string name="vpn_section_network">网络</string>
