@@ -125,6 +125,7 @@
     <string name="split_tunnel_show_system">Show system apps</string>
     <string name="split_tunnel_presets_label">Network Presets</string>
     <string name="split_tunnel_private_nets">Private Networks (172/192)</string>
+    <string name="split_tunnel_private_nets_hint">10.0.0.0/8 is excluded — it overlaps the VPN gateway. Add your specific 10.x subnet as a custom network if needed.</string>
     <string name="split_tunnel_wifi_subnet">WiFi Subnet (%1$s)</string>
     <string name="split_tunnel_no_wifi">WiFi Subnet (not connected)</string>
     <string name="split_tunnel_custom_label">Custom Networks</string>
