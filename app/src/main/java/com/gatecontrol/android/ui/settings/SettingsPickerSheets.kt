@@ -225,6 +225,7 @@ fun LanguagePickerSheet(
         title = stringResource(R.string.settings_language),
         options = listOf(
             "en" to "English",
+            "zh" to "简体中文",
             "de" to "Deutsch",
         ),
         current = current,
