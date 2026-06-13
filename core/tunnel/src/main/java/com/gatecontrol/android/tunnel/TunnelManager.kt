@@ -238,7 +238,8 @@ class TunnelManager @Inject constructor(private val context: Context) {
         // Effective DNS list:
         //   1. If user supplied DNS overrides, use those.
         //   2. Otherwise use whatever the WG config specified.
-        // Then filter by IP-family if user picked "ipv4_only" / "ipv6_only".
+        // Then strict-filter by IP-family (only same-family DNS works
+        // when the interface has no inner address of the other family).
         val rawDns = if (splitConfig.dnsServers.isNotEmpty()) {
             splitConfig.dnsServers
         } else {
@@ -246,9 +247,27 @@ class TunnelManager @Inject constructor(private val context: Context) {
         }
         val effectiveDns = NetworkPrefsHelpers.filterDnsByProtocol(rawDns, splitConfig.ipProtocol)
 
+        // Interface inner addresses (the `Address = ...` line in WG config).
+        // STRICTLY filter to the requested family — this is what stops the
+        // kernel from generating outbound packets of the other family. With
+        // no inner address of family X, sockets can't bind to X and packets
+        // of family X that hit the tun interface have nowhere to go.
+        val effectiveAddresses = NetworkPrefsHelpers.filterInterfaceAddresses(
+            parsed.address, splitConfig.ipProtocol,
+        )
+        if (effectiveAddresses.isEmpty() && parsed.address.isNotEmpty()) {
+            // User picked a family the WG config doesn't carry — falling back
+            // to the original to let the tunnel come up. Without this we'd
+            // throw on `parseAddresses("")` and connect would fail.
+            Timber.w(
+                "WG config has no %s inner address — falling back to dual-stack to let tunnel start",
+                splitConfig.ipProtocol,
+            )
+        }
+
         val ifaceBuilder = Interface.Builder()
             .parsePrivateKey(parsed.privateKey)
-            .parseAddresses(parsed.address)
+            .parseAddresses(effectiveAddresses.ifEmpty { parsed.address })
 
         effectiveDns.forEach { dns ->
             ifaceBuilder.parseDnsServers(dns)
@@ -291,11 +310,18 @@ class TunnelManager @Inject constructor(private val context: Context) {
             .filter { it.isNotEmpty() }
             .map { if (it.contains(":")) "$it/128" else "$it/32" }
 
+        // AllowedIPs assembly — see applyAllowedIpsWithLeakGuard kdoc for the
+        // leak prevention reasoning. In short: we ALWAYS keep both families
+        // in the route table when single-stack mode is active; the rejected
+        // family is routed into the tunnel (no inner address → drop) so it
+        // can't escape to the underlying physical network.
         val allowedIpsRaw = when (splitConfig.mode) {
             "exclude" -> {
                 if (splitConfig.networks.isEmpty()) {
                     // No networks excluded — full tunnel (use original AllowedIPs)
-                    NetworkPrefsHelpers.filterAllowedIpsByProtocol(parsed.allowedIps, splitConfig.ipProtocol)
+                    NetworkPrefsHelpers.applyAllowedIpsStringWithLeakGuard(
+                        parsed.allowedIps, splitConfig.ipProtocol,
+                    )
                 } else {
                     // Compute complement: 0.0.0.0/0 minus excluded networks (IPv4)
                     val complement = CidrComplement.computeAllowedIps(splitConfig.networks)
@@ -303,17 +329,24 @@ class TunnelManager @Inject constructor(private val context: Context) {
                     // "everything through VPN except these networks", so IPv6 must also
                     // be tunneled. Also add DNS + VPN subnet to prevent DNS leaks.
                     val combined = (complement + listOf("::/0") + dnsIps + VPN_SUBNET).distinct()
-                    NetworkPrefsHelpers.filterCidrsByProtocol(combined, splitConfig.ipProtocol).joinToString(",")
+                    NetworkPrefsHelpers.applyAllowedIpsWithLeakGuard(
+                        combined, splitConfig.ipProtocol,
+                    ).joinToString(",")
                 }
             }
             "include" -> {
-                // Only route specified networks + DNS + VPN subnet
+                // Only route specified networks + DNS + VPN subnet, plus
+                // the rejected-family blackhole if single-stack is active.
                 val combined = (splitConfig.networks + dnsIps + VPN_SUBNET).distinct()
-                NetworkPrefsHelpers.filterCidrsByProtocol(combined, splitConfig.ipProtocol).joinToString(",")
+                NetworkPrefsHelpers.applyAllowedIpsWithLeakGuard(
+                    combined, splitConfig.ipProtocol,
+                ).joinToString(",")
             }
             else -> {
-                // Off — use original AllowedIPs from WG config
-                NetworkPrefsHelpers.filterAllowedIpsByProtocol(parsed.allowedIps, splitConfig.ipProtocol)
+                // Off — use original AllowedIPs from WG config + leak guard.
+                NetworkPrefsHelpers.applyAllowedIpsStringWithLeakGuard(
+                    parsed.allowedIps, splitConfig.ipProtocol,
+                )
             }
         }
         peerBuilder.parseAllowedIPs(allowedIpsRaw)
