@@ -179,6 +179,7 @@
     <string name="settings_license_managed">Lizenz wird serverseitig verwaltet</string>
     <string name="settings_logs">Protokolle</string>
     <string name="settings_logs_view">Protokolle anzeigen</string>
+    <string name="settings_logging_enabled">In Datei protokollieren</string>
     <string name="settings_logs_export">Protokolle exportieren</string>
     <string name="settings_about">Über</string>
     <string name="settings_version">Version %1$s</string>
