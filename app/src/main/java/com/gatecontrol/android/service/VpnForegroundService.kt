@@ -95,6 +95,10 @@ class VpnForegroundService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // v6.2: keep monitor alive across reconnects. If the auto-reconnect
+        // chain fails and the user later re-establishes the tunnel by hand,
+        // we still need health checks.
+        startStateObserver()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -242,8 +246,25 @@ class VpnForegroundService : VpnService() {
      * The 300 ms post-disconnect delay matches what was in v1 — GoBackend's
      * VPN file descriptor needs a moment to fully release before we can
      * setState(UP) again, otherwise it throws BackendException.
+     *
+     * ## v6.2 fix: exclude the stalling port
+     *
+     * Without excludePorts, when the persisted port equals the stalling
+     * port (the common case — last-successful is whatever we were just
+     * using), Coordinator's preferred-first logic would retry the same
+     * port that just failed. We capture the active port BEFORE disconnect
+     * (disconnect nulls it) and pass it as excludePorts so the strategy
+     * picks something genuinely different.
      */
     private suspend fun handleMonitorStall() {
+        // Capture BEFORE disconnect — coordinator.activePort goes null
+        // once we tear down.
+        val stallingPort = portRotationCoordinator.activePort.value
+        val excludeSet = if (stallingPort != null) setOf(stallingPort) else emptySet()
+        Timber.i(
+            "VpnForegroundService: monitor stall on port=$stallingPort; will exclude from retry"
+        )
+
         try { tunnelManager.disconnect() } catch (_: Exception) {}
         delay(300L)
 
@@ -253,22 +274,53 @@ class VpnForegroundService : VpnService() {
         val serverUrl = setupRepository.getServerUrl()
         val splitConfig = tunnelConnector.resolveSplitTunnelConfig(serverUrl)
 
+        // Pass the persisted port as preferredFirstPort even if it equals
+        // the stalling port — the excludePorts machinery will skip it,
+        // and if a future Coordinator change un-skips it, that's a logged
+        // behavior we'd notice rather than silent wrong-port retry.
         val persisted = settingsRepository.getLastSuccessfulPort().first().takeIf { it != 0 }
         val outcome = portRotationCoordinator.connectWithRetry(
             rawConfig = rawConfig,
             splitConfig = splitConfig,
             preferredFirstPort = persisted,
+            excludePorts = excludeSet,
         )
         when (outcome) {
             is PortRotationCoordinator.Outcome.Connected -> {
-                // Re-arm the monitor on the new tunnel.
+                // Re-arm the monitor on the new tunnel. We re-arm even if
+                // the rotation didn't actually change the port (could happen
+                // if persisted != active and persisted succeeded) so the
+                // tunnel stays observed.
                 startTunnelMonitor()
             }
             else -> {
                 Timber.w("VpnForegroundService: monitor-triggered reconnect failed — $outcome")
-                // Don't restart the monitor — there's nothing to monitor.
-                // The user will see TunnelState.Disconnected and the UI's
-                // toast subscription will surface the failure.
+                // The tunnel is now disconnected. We don't restart the
+                // monitor because there's nothing to monitor — but we do
+                // need to make sure that when the user (or auto-connect)
+                // brings the tunnel back up, the monitor resumes. That's
+                // handled by the tunnelManager.state observer in
+                // [startStateObserver] (see below).
+            }
+        }
+    }
+
+    /**
+     * v6.2: Observe the global tunnel state. When the tunnel transitions
+     * to [TunnelState.Connected] but no monitor is currently running,
+     * start one. This covers the case where [handleMonitorStall] failed
+     * and the user later brings the tunnel back up manually — without
+     * this observer, the new tunnel would have no health checks.
+     */
+    private fun startStateObserver() {
+        serviceScope.launch {
+            tunnelManager.state.collect { state ->
+                if (state is com.gatecontrol.android.tunnel.TunnelState.Connected
+                    && tunnelMonitor == null
+                ) {
+                    Timber.d("VpnForegroundService: tunnel reconnected; re-arming monitor")
+                    startTunnelMonitor()
+                }
             }
         }
     }
