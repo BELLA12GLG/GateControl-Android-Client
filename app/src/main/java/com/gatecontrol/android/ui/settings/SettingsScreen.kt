@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.QrCodeScanner
@@ -202,41 +201,42 @@ fun SettingsScreen(
         }
 
         // ── License ──
-        IosListSection(header = stringResource(R.string.settings_license)) {
-            IosValueRow(
-                title = if (uiState.isPro) stringResource(R.string.settings_license_pro)
-                        else stringResource(R.string.settings_license_community),
-                value = "",
-                icon = Icons.Filled.Star,
-                iconBg = if (uiState.isPro) IosTileYellow else IosTileGray,
-                showDivider = true,
-            )
-            IosNavigationRow(
-                title = if (uiState.isPro) stringResource(R.string.settings_license_refresh)
-                        else stringResource(R.string.settings_license_activate),
-                icon = Icons.Filled.Receipt,
-                iconBg = IosTileGray,
-                onClick = { viewModel.refreshLicense() },
-            )
+        // v6.2: only render the License section when the user actually has a
+        // Pro license. Hiding the "Community / Activate" rows for non-Pro
+        // users avoids advertising in-app and matches the cleaner iOS-style.
+        if (uiState.isPro) {
+            IosListSection(header = stringResource(R.string.settings_license)) {
+                IosValueRow(
+                    title = stringResource(R.string.settings_license_pro),
+                    value = "",
+                    icon = Icons.Filled.Star,
+                    iconBg = IosTileYellow,
+                    showDivider = true,
+                )
+                IosNavigationRow(
+                    title = stringResource(R.string.settings_license_refresh),
+                    icon = Icons.Filled.Receipt,
+                    iconBg = IosTileGray,
+                    onClick = { viewModel.refreshLicense() },
+                )
+            }
         }
 
         // ── Diagnostics ──
         IosListSection(header = stringResource(R.string.settings_section_diagnostics)) {
+            IosToggleRow(
+                title = stringResource(R.string.settings_logging_enabled),
+                icon = Icons.Filled.Receipt,
+                iconBg = IosTileGray,
+                checked = uiState.loggingEnabled,
+                onCheckedChange = { viewModel.setLoggingEnabled(it) },
+                showDivider = true,
+            )
             IosNavigationRow(
                 title = stringResource(R.string.settings_logs_view),
                 icon = Icons.Filled.FileDownload,
                 iconBg = IosTileGray,
-                showDivider = true,
                 onClick = onNavigateToLogs,
-            )
-            IosNavigationRow(
-                title = stringResource(R.string.settings_check_for_updates),
-                icon = Icons.Filled.NewReleases,
-                iconBg = IosTileGreen,
-                trailingText = uiState.updateInfo?.let { info ->
-                    if (info.available) "•" else null
-                },
-                onClick = { viewModel.checkForUpdate(versionName) },
             )
         }
 
