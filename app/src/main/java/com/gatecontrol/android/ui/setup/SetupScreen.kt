@@ -52,9 +52,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.gatecontrol.android.R
-import com.gatecontrol.android.ui.components.GcOutlineButton
-import com.gatecontrol.android.ui.components.GcPrimaryButton
-import com.gatecontrol.android.ui.components.GcSecondaryButton
+import com.gatecontrol.android.ui.components.ios.IosPrimaryButton
+import com.gatecontrol.android.ui.components.ios.IosTintedButton
 import com.gatecontrol.android.ui.theme.GateControlTheme
 
 @Composable
@@ -152,14 +151,14 @@ fun SetupScreen(
             Spacer(Modifier.height(16.dp))
 
             // Primary action: Scan QR
-            GcPrimaryButton(
+            IosPrimaryButton(
                 text = stringResource(R.string.setup_qr),
                 onClick = onNavigateToQr,
                 enabled = !uiState.isLoading,
             )
 
             // Secondary action: Enter Manually
-            GcSecondaryButton(
+            IosTintedButton(
                 text = stringResource(R.string.setup_manual),
                 onClick = { viewModel.toggleManualExpanded() },
                 enabled = !uiState.isLoading,
@@ -183,7 +182,7 @@ fun SetupScreen(
             }
 
             // Outline action: Import Config
-            GcOutlineButton(
+            IosTintedButton(
                 text = stringResource(R.string.setup_import),
                 onClick = { configFileLauncher.launch("*/*") },
                 enabled = !uiState.isLoading,
@@ -263,13 +262,13 @@ private fun ManualEntrySection(
             ),
         )
 
-        GcSecondaryButton(
+        IosTintedButton(
             text = stringResource(R.string.settings_test_connection),
             onClick = onTestConnection,
             enabled = !isLoading,
         )
 
-        GcPrimaryButton(
+        IosPrimaryButton(
             text = stringResource(R.string.settings_save_register),
             onClick = onSaveAndRegister,
             enabled = !isLoading,
