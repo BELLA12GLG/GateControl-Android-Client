@@ -1,7 +1,5 @@
 package com.gatecontrol.android.ui.settings
 
-import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Spacer
@@ -250,24 +248,7 @@ fun SettingsScreen(
                 value = versionName,
                 icon = Icons.Outlined.Info,
                 iconBg = IosTileGray,
-                showDivider = uiState.updateInfo?.available == true,
             )
-            if (uiState.updateInfo?.available == true) {
-                val updateInfo = uiState.updateInfo!!
-                IosNavigationRow(
-                    title = stringResource(
-                        R.string.settings_update_available,
-                        updateInfo.version ?: ""
-                    ),
-                    icon = Icons.Filled.UploadFile,
-                    iconBg = IosTileBlue,
-                    onClick = {
-                        updateInfo.downloadUrl?.let { url ->
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                        }
-                    },
-                )
-            }
         }
     }
 
