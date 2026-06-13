@@ -8,6 +8,8 @@ import com.gatecontrol.android.network.HostnameReportRequest
 import com.gatecontrol.android.tunnel.SplitTunnelConfig
 import com.gatecontrol.android.tunnel.TunnelManager
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import timber.log.Timber
@@ -21,6 +23,10 @@ import javax.inject.Singleton
  *  - 服务器模式：拉取 split-tunnel preset、预解析 DNS、上报主机名
  *  - 纯 WireGuard 模式（[SetupRepository.isWireGuardOnlyMode]）：跳过所有服务器调用，
  *    直接用本地存储的 WireGuard 配置连接，不崩溃
+ *
+ * 此类是 split-tunnel 配置解析的**唯一**权威实现。其他入口点（[VpnForegroundService] 的
+ * 自启路径、[com.gatecontrol.android.ui.vpn.VpnViewModel] 的手动 connect 路径）都必须
+ * 通过 [resolveSplitTunnelConfig] 获取配置，而不是各自复制一份解析逻辑。
  */
 @Singleton
 class TunnelConnector @Inject constructor(
@@ -30,17 +36,28 @@ class TunnelConnector @Inject constructor(
     private val tunnelManager: TunnelManager,
 ) {
 
-    suspend fun connectWithUserSettings(): Boolean {
+    /**
+     * 防止 connect 流程被并发触发（开机自启 + Tile 同时点击等场景）。
+     * resolveSplitTunnelConfig 内部写 DataStore，并发会造成 last-write-wins 覆盖。
+     */
+    private val connectMutex = Mutex()
+
+    /** V1→V2 迁移只运行一次，由 [ensureSplitTunnelMigrated] 守护。 */
+    @Volatile
+    private var migrationDone = false
+
+    suspend fun connectWithUserSettings(): Boolean = connectMutex.withLock {
         val config = setupRepository.getWireGuardConfig()
         if (config.isEmpty()) {
             Timber.w("TunnelConnector: no WireGuard config available")
-            return false
+            return@withLock false
         }
 
         // 纯 WireGuard 模式：跳过所有服务器交互
         if (setupRepository.isWireGuardOnlyMode()) {
             Timber.d("TunnelConnector: WireGuard-only mode — skipping server calls")
-            return connectTunnel(config, SplitTunnelConfig(), serverUrl = "")
+            val splitTunnelConfig = resolveSplitTunnelConfig(serverUrl = "")
+            return@withLock connectTunnel(config, splitTunnelConfig, serverUrl = "")
         }
 
         val serverUrl = setupRepository.getServerUrl()
@@ -55,31 +72,21 @@ class TunnelConnector @Inject constructor(
 
         val splitTunnelConfig = resolveSplitTunnelConfig(serverUrl)
 
-        return connectTunnel(config, splitTunnelConfig, serverUrl)
+        return@withLock connectTunnel(config, splitTunnelConfig, serverUrl)
     }
 
-    private suspend fun connectTunnel(
-        config: String,
-        splitTunnelConfig: SplitTunnelConfig,
-        serverUrl: String,
-    ): Boolean {
-        return try {
-            tunnelManager.connect(config, splitTunnelConfig)
-            Timber.d(
-                "TunnelConnector: tunnel connect requested (mode=%s, %d networks, %d apps)",
-                splitTunnelConfig.mode,
-                splitTunnelConfig.networks.size,
-                splitTunnelConfig.apps.size,
-            )
-            if (serverUrl.isNotEmpty()) reportDeviceHostname(serverUrl)
-            true
-        } catch (e: Exception) {
-            Timber.e(e, "TunnelConnector: connect failed")
-            false
-        }
-    }
+    /**
+     * 解析当前用户的 split-tunnel 配置。**所有**连接路径都应通过此方法获取配置，
+     * 不要再复制实现。
+     *
+     * 在解析前会先触发一次性的 V1→V2 迁移（[SettingsRepository.migrateSplitTunnelIfNeeded]），
+     * 确保从旧版本升级的用户的 split-tunnel 设置不会因为没打开过 Settings 页面而丢失。
+     *
+     * @param serverUrl 服务器 URL；空字符串表示纯 WireGuard 模式，跳过服务器 preset 拉取。
+     */
+    suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
+        ensureSplitTunnelMigrated()
 
-    private suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
         var splitTunnelConfig = SplitTunnelConfig()
         try {
             var adminPresetActive = false
@@ -125,6 +132,50 @@ class TunnelConnector @Inject constructor(
             Timber.w(e, "Split-tunnel config load failed")
         }
         return splitTunnelConfig
+    }
+
+    /**
+     * 在 connect 路径上确保 V1→V2 split-tunnel 迁移已执行。
+     *
+     * 旧版本只在 [com.gatecontrol.android.ui.settings.SettingsViewModel] 初始化时调用
+     * [SettingsRepository.migrateSplitTunnelIfNeeded]，导致从未打开 Settings 页面的
+     * 用户在升级后丢失分流配置（mode 默认为 "off"）。这里在所有 connect 入口都先
+     * 触发迁移，且通过 [migrationDone] 与 mutex 双重幂等：
+     *  - mutex 保证同一进程内只有一个 connect 在跑；
+     *  - migrationDone 标志避免每次 connect 都触发 DataStore 写事务；
+     *  - migrateSplitTunnelIfNeeded 本身的条件 (`oldEnabled != null && newMode == null`)
+     *    保证即使被多次调用也不会重复迁移或破坏已有 v2 数据。
+     */
+    private suspend fun ensureSplitTunnelMigrated() {
+        if (migrationDone) return
+        try {
+            settingsRepository.migrateSplitTunnelIfNeeded()
+        } catch (e: Exception) {
+            Timber.w(e, "Split-tunnel V1→V2 migration failed (will retry on next connect)")
+            return // 不要设 migrationDone，下次再试
+        }
+        migrationDone = true
+    }
+
+    private suspend fun connectTunnel(
+        config: String,
+        splitTunnelConfig: SplitTunnelConfig,
+        serverUrl: String,
+    ): Boolean {
+        return try {
+            tunnelManager.connect(config, splitTunnelConfig)
+            Timber.d(
+                "TunnelConnector: tunnel connect requested (mode=%s, %d networks, %d apps)",
+                splitTunnelConfig.mode,
+                splitTunnelConfig.networks.size,
+                splitTunnelConfig.apps.size,
+            )
+            if (serverUrl.isNotEmpty()) reportDeviceHostname(serverUrl)
+            true
+        } catch (e: Exception) {
+            Timber.e(e, "TunnelConnector: connect failed")
+            false
+        }
     }
 
     private suspend fun reportDeviceHostname(serverUrl: String) {
