@@ -294,9 +294,15 @@ class VpnViewModel @Inject constructor(
                 val eqIndex = line.indexOf('=')
                 val prefix = line.substring(0, eqIndex + 1)
                 val value = line.substring(eqIndex + 1).trim()
-                val hostPart = when {
-                    value.startsWith("[") -> value.substringBeforeLast(":")
-                    else -> value.substringBeforeLast(":")
+                // IPv6 格式：[2001:db8::1]:51820 — host 部分含多个冒号，
+                // 必须保留完整的 [...] 括号，不能用 substringBeforeLast(':')。
+                // IPv4/域名格式：1.2.3.4:51820 或 example.com:51820 — 最后一个冒号前为 host。
+                val hostPart = if (value.startsWith("[")) {
+                    val closeBracket = value.indexOf(']')
+                    if (closeBracket != -1) value.substring(0, closeBracket + 1)  // 保留 [::1]
+                    else value.substringBeforeLast(":")
+                } else {
+                    value.substringBeforeLast(":")
                 }
                 "$prefix $hostPart:$port"
             } else {
