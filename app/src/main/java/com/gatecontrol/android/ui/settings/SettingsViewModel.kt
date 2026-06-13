@@ -34,9 +34,16 @@ data class SettingsUiState(
     val locale: String = "de",
     val autoConnect: Boolean = false,
     val killSwitch: Boolean = false,
+    // Deprecated v1 fields — retained for backward compatibility with persisted
+    // preferences and test fixtures. The UI binds to splitTunnelMode (below);
+    // these are no longer read by the connect path. See TunnelConnector.
+    @Deprecated("Use splitTunnelMode instead", ReplaceWith("splitTunnelMode != \"off\""))
     val splitTunnelEnabled: Boolean = false,
+    @Deprecated("Use splitTunnelNetworks instead")
     val splitTunnelRoutes: String = "",
+    @Deprecated("Use splitTunnelAppsV2 instead")
     val splitTunnelApps: String = "",
+    // V2 split-tunnel state (current). This is what the connect path reads.
     val splitTunnelMode: String = "off",
     val splitTunnelNetworks: List<NetworkEntry> = emptyList(),
     val splitTunnelAppsV2: List<String> = emptyList(),
@@ -81,6 +88,7 @@ class SettingsViewModel @Inject constructor(
                 settingsRepository.getSplitTunnelEnabled()
             ) { theme, locale, autoConnect, killSwitch, splitTunnelEnabled ->
                 _uiState.update {
+                    @Suppress("DEPRECATION")
                     it.copy(
                         theme = theme,
                         locale = locale,
@@ -94,12 +102,14 @@ class SettingsViewModel @Inject constructor(
 
         viewModelScope.launch {
             settingsRepository.getSplitTunnelRoutes().collect { routes ->
+                @Suppress("DEPRECATION")
                 _uiState.update { it.copy(splitTunnelRoutes = routes) }
             }
         }
 
         viewModelScope.launch {
             settingsRepository.getSplitTunnelApps().collect { apps ->
+                @Suppress("DEPRECATION")
                 _uiState.update { it.copy(splitTunnelApps = apps) }
             }
         }
@@ -177,9 +187,17 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * @deprecated UI no longer uses this toggle — it binds to [setSplitTunnelMode] instead.
+     *   Retained only for SettingsViewModelTest backward compatibility. The connect path
+     *   reads [SettingsRepository.getSplitTunnelMode], so this setter has no effect on
+     *   whether split-tunnel is active.
+     */
+    @Deprecated("Use setSplitTunnelMode instead", ReplaceWith("setSplitTunnelMode(if (enabled) \"exclude\" else \"off\")"))
     fun setSplitTunnelEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepository.setSplitTunnelEnabled(enabled)
+            @Suppress("DEPRECATION")
             _uiState.update { it.copy(splitTunnelEnabled = enabled) }
         }
     }
@@ -270,18 +288,24 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /** @deprecated Use [setSplitTunnelNetworks] instead. Kept for test backward compatibility. */
+    @Deprecated("Use setSplitTunnelNetworks instead")
     fun saveSplitRoutes(routes: String) {
         val validRoutes = Validation.parseSplitRoutes(routes)
         val cleaned = validRoutes.joinToString("\n")
         viewModelScope.launch {
             settingsRepository.setSplitTunnelRoutes(cleaned)
+            @Suppress("DEPRECATION")
             _uiState.update { it.copy(splitTunnelRoutes = cleaned) }
         }
     }
 
+    /** @deprecated Use [setSplitTunnelAppsV2] instead. Kept for backward compatibility. */
+    @Deprecated("Use setSplitTunnelAppsV2 instead")
     fun setSplitTunnelApps(apps: String) {
         viewModelScope.launch {
             settingsRepository.setSplitTunnelApps(apps)
+            @Suppress("DEPRECATION")
             _uiState.update { it.copy(splitTunnelApps = apps) }
         }
     }
