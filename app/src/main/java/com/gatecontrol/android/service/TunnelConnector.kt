@@ -87,7 +87,19 @@ class TunnelConnector @Inject constructor(
     suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
         ensureSplitTunnelMigrated()
 
-        var splitTunnelConfig = SplitTunnelConfig()
+        // Read network preferences once — they apply regardless of split-tunnel mode.
+        val ipProtocol = settingsRepository.getIpProtocol().first()
+        val dnsList = buildList {
+            val p = settingsRepository.getDnsPrimary().first().trim()
+            val s = settingsRepository.getDnsSecondary().first().trim()
+            if (p.isNotEmpty()) add(p)
+            if (s.isNotEmpty()) add(s)
+        }
+
+        var splitTunnelConfig = SplitTunnelConfig(
+            ipProtocol = ipProtocol,
+            dnsServers = dnsList,
+        )
         try {
             var adminPresetActive = false
             if (serverUrl.isNotEmpty()) {
@@ -109,6 +121,8 @@ class TunnelConnector @Inject constructor(
                             mode = preset.mode,
                             networks = preset.networks.map { it.cidr },
                             apps = parseSplitAppsJson(userApps),
+                            ipProtocol = ipProtocol,
+                            dnsServers = dnsList,
                         )
                     }
                 } catch (e: Exception) {
@@ -125,6 +139,8 @@ class TunnelConnector @Inject constructor(
                         mode = mode,
                         networks = parseSplitNetworksJsonToCidrs(networksJson),
                         apps = parseSplitAppsJson(appsJson),
+                        ipProtocol = ipProtocol,
+                        dnsServers = dnsList,
                     )
                 }
             }
