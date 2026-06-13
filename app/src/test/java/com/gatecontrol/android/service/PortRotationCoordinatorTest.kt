@@ -231,4 +231,38 @@ class PortRotationCoordinatorTest {
         assertEquals(51820, attemptedPorts.first(),
             "Original port should be the first thing tried after excluding 8443")
     }
+
+    // ── v6.2: Monitor-triggered reconnect bug fix ────────────────────────────
+    //
+    // Regression test for the auto-rotate-but-same-port bug parallel to the
+    // manual-rotate one fixed in v6.1. The Service's handleMonitorStall path
+    // used to pass preferredFirstPort=persisted with NO excludePorts, so when
+    // persisted == stalling port (the common case — last successful is what
+    // we were just using), the rotation would retry the failing port and
+    // waste an attempt before finding an alternative.
+
+    @Test
+    fun `monitor stall scenario - persisted == stalling port must be excluded`() = runTest {
+        // Simulate: user was connected on 8443 (was persisted, was active),
+        // tunnel stalled. Service captures activePort=8443 as excludePorts,
+        // also passes persisted=8443 as preferredFirstPort. excludePorts wins.
+        var attemptedPorts = mutableListOf<Int>()
+        coEvery { tunnelManager.connect(any<String>(), any<SplitTunnelConfig>()) } answers {
+            val cfg = firstArg<String>()
+            val match = Regex("""Endpoint\s*=\s*[^:]+:(\d+)""").find(cfg)
+            match?.groupValues?.get(1)?.toIntOrNull()?.let { attemptedPorts.add(it) }
+        }
+        val outcome = coordinator.connectWithRetry(
+            rawConfig = sampleConfig,
+            splitConfig = SplitTunnelConfig(),
+            preferredFirstPort = 8443,         // persisted
+            excludePorts = setOf(8443),        // currently active (= stalling)
+        )
+        assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
+        assertFalse(8443 in attemptedPorts,
+            "Stalling port 8443 must not be the first thing retried")
+        // First attempt should be originalPort (51820), then PortStrategy 443
+        assertEquals(51820, attemptedPorts.first(),
+            "Fallback to originalPort after excluding the stalling port")
+    }
 }
