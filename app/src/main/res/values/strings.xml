@@ -271,4 +271,32 @@
     <string name="split_tunnel_cidr_invalid">Not a valid CIDR (e.g. 10.0.1.0/24)</string>
     <string name="split_tunnel_cidr_duplicate">Already in the list</string>
     <string name="split_tunnel_label_hint">e.g. \"Home LAN\"</string>
+    <!-- Network preferences (v4.7) -->
+    <string name="network_settings_title">Network</string>
+    <string name="ip_protocol_header">IP protocol</string>
+    <string name="ip_protocol_auto">Auto (prefer IPv4)</string>
+    <string name="ip_protocol_auto_short">Auto</string>
+    <string name="ip_protocol_auto_desc">Connect over either IPv4 or IPv6, preferring IPv4 when both are available.</string>
+    <string name="ip_protocol_ipv6_preferred">Prefer IPv6</string>
+    <string name="ip_protocol_ipv6_preferred_short">IPv6 first</string>
+    <string name="ip_protocol_ipv6_preferred_desc">Use IPv6 when the server is reachable over it, otherwise fall back to IPv4.</string>
+    <string name="ip_protocol_ipv4_only">IPv4 only</string>
+    <string name="ip_protocol_ipv4_only_short">IPv4</string>
+    <string name="ip_protocol_ipv4_only_desc">Refuse IPv6 entirely. Only IPv4 will be used for the server endpoint and inside the tunnel.</string>
+    <string name="ip_protocol_ipv6_only">IPv6 only</string>
+    <string name="ip_protocol_ipv6_only_short">IPv6</string>
+    <string name="ip_protocol_ipv6_only_desc">Refuse IPv4 entirely. Only IPv6 will be used for the server endpoint and inside the tunnel.</string>
+    <string name="dns_header">DNS servers</string>
+    <string name="dns_footer">Leave both fields empty to use the DNS servers from your VPN config (or the system DNS if your config doesn\'t specify any).</string>
+    <string name="dns_primary_label">Primary DNS</string>
+    <string name="dns_secondary_label">Secondary DNS</string>
+    <string name="dns_invalid">Not a valid IPv4 or IPv6 address</string>
+    <string name="dns_presets_header">Presets</string>
+    <string name="dns_preset_system">System default</string>
+    <!-- App picker enhancements -->
+    <string name="split_tunnel_pick_apps">Choose apps</string>
+    <string name="split_tunnel_selected_header">Selected (%1$d)</string>
+    <string name="split_tunnel_all_apps_header">All apps (%1$d)</string>
+    <string name="split_tunnel_clear_all">Clear all</string>
+    <string name="split_tunnel_no_matches">No matches for \"%1$s\"</string>
 </resources>
