@@ -86,6 +86,24 @@ fun VpnScreen(
     val permissions by viewModel.permissions.collectAsState()
     val killSwitchEnabled by viewModel.killSwitchEnabled.collectAsState()
     val activePort by viewModel.activePort.collectAsState()
+    // v6.1: per-attempt progress for the Connecting state — null means
+    // "idle / not in a retry sequence".
+    val currentAttempt by viewModel.currentAttempt.collectAsState()
+
+    // v6.1: surface Monitor-triggered reconnect failures + manual-rotate
+    // failures as Toasts. The flow is hot, so we collect once with Unit key.
+    LaunchedEffect(Unit) {
+        viewModel.toastMessages.collect { msg ->
+            val resId = when (msg) {
+                VpnViewModel.ToastMessage.RECONNECT_FAILED -> R.string.vpn_toast_reconnect_failed
+                VpnViewModel.ToastMessage.RECONNECT_EXHAUSTED -> R.string.vpn_toast_reconnect_exhausted
+                VpnViewModel.ToastMessage.ROTATE_FAILED -> R.string.vpn_toast_rotate_failed
+            }
+            android.widget.Toast.makeText(
+                context, context.getString(resId), android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
 
     var showRotatePortDialog by remember { mutableStateOf(false) }
 
@@ -176,7 +194,19 @@ fun VpnScreen(
             val server = viewModel.serverHost ?: stringResource(R.string.vpn_server)
             if (uptimeSeconds > 0) "$server · $uptimeText" else server
         }
-        BigToggleState.Connecting -> stringResource(R.string.vpn_state_connecting_subtitle)
+        BigToggleState.Connecting -> {
+            // v6.1: when the coordinator is iterating through ports, show
+            // which port it's currently trying and how many attempts deep.
+            // Falls back to the generic "establishing tunnel" string when
+            // no attempt info is available (early in connecting, or for
+            // non-rotation-driven connect paths).
+            currentAttempt?.let { ai ->
+                stringResource(
+                    R.string.vpn_state_connecting_attempt,
+                    ai.port, ai.attempt, ai.maxAttempts,
+                )
+            } ?: stringResource(R.string.vpn_state_connecting_subtitle)
+        }
         BigToggleState.Disconnected -> stringResource(R.string.vpn_state_disconnected_subtitle)
     }
 
