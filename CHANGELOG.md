@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.41] - 2026-06-13
+
+### Changes
+- 更新 NetworkPrefsHelpersTest.kt
+
+---
+
 ## [1.6.40] - 2026-06-13
 
 ### Changes
