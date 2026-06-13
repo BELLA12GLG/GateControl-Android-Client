@@ -9,6 +9,7 @@ import com.gatecontrol.android.network.ApiClientProvider
 import com.gatecontrol.android.network.PermissionFlags
 import com.gatecontrol.android.network.TrafficStats
 import com.gatecontrol.android.network.VpnService
+import com.gatecontrol.android.service.TunnelConnector
 import com.gatecontrol.android.service.TunnelStateHolder
 import com.gatecontrol.android.tunnel.PortRotator
 import com.gatecontrol.android.tunnel.SplitTunnelConfig
@@ -26,8 +27,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 import timber.log.Timber
 import javax.inject.Inject
 
@@ -38,6 +37,9 @@ class VpnViewModel @Inject constructor(
     private val licenseRepository: LicenseRepository,
     private val apiClientProvider: ApiClientProvider,
     private val tunnelManager: TunnelManager,
+    // fix #3：TunnelConnector 是 split-tunnel 配置解析的唯一权威源。
+    // VpnViewModel 不再自己复制 resolveSplitTunnelConfig — 那会导致两份实现发散。
+    private val tunnelConnector: TunnelConnector,
 ) : ViewModel() {
 
     val tunnelState: StateFlow<TunnelState> = tunnelManager.state
@@ -189,23 +191,18 @@ class VpnViewModel @Inject constructor(
                 rawConfig
             }
 
-            // 服务器模式：拉取 split-tunnel preset；纯 WG 模式：用空配置
+            // fix #3：通过 TunnelConnector 解析 split-tunnel 配置 — 与开机自启、
+            // Tile 路径完全一致。VpnViewModel 不再维护自己的副本。
+            // TunnelConnector 内部已处理：纯 WG 模式跳过服务器调用、V1→V2 迁移、
+            // admin preset 拉取、DNS 预解析。
             val serverUrl = setupRepository.getServerUrl()
-            val splitConfig = if (setupRepository.isWireGuardOnlyMode()) {
-                SplitTunnelConfig()
-            } else {
-                // 服务器模式：预解析 DNS
-                if (serverUrl.startsWith("http://") || serverUrl.startsWith("https://")) {
-                    try {
-                        val host = java.net.URI(serverUrl).host
-                        if (host != null) apiClientProvider.preResolveDns(host)
-                    } catch (_: Exception) {}
-                }
-                resolveSplitTunnelConfig(serverUrl)
-            }
+            val splitConfig = tunnelConnector.resolveSplitTunnelConfig(serverUrl)
             lastSplitTunnelConfig = splitConfig
 
             // 首次连接：失败后自动轮换端口重试，最多尝试5个候选端口
+            // 注意：这里直接调 tunnelManager.connect 而不是 tunnelConnector.connectWithUserSettings，
+            // 因为端口轮转需要细粒度控制连接失败后的重试。TunnelConnector 适合一次性连接，
+            // VpnViewModel 适合带重试的连接。两者共享同一份 splitConfig。
             var connected = false
             try {
                 tunnelManager.connect(configToConnect, splitConfig)
@@ -460,54 +457,6 @@ class VpnViewModel @Inject constructor(
         }
     }
 
-    // ── Split-tunnel（仅服务器模式）───────────────────────────────────────────
-
-    private suspend fun resolveSplitTunnelConfig(serverUrl: String): SplitTunnelConfig {
-        var splitTunnelConfig = SplitTunnelConfig()
-        try {
-            var adminPresetActive = false
-            if (serverUrl.isNotEmpty()) {
-                try {
-                    val client = apiClientProvider.getClient(serverUrl)
-                    val preset = client.getSplitTunnelPreset()
-                    if (preset.ok && preset.mode != "off" && preset.source != "none") {
-                        settingsRepository.setSplitTunnelMode(preset.mode)
-                        val arr = JSONArray()
-                        preset.networks.forEach {
-                            arr.put(JSONObject().put("cidr", it.cidr).put("label", it.label))
-                        }
-                        settingsRepository.setSplitTunnelNetworks(arr.toString())
-                        settingsRepository.setSplitTunnelAdminLocked(preset.locked)
-                        adminPresetActive = true
-                        val userApps = settingsRepository.getSplitTunnelAppsV2().first()
-                        splitTunnelConfig = SplitTunnelConfig(
-                            mode = preset.mode,
-                            networks = preset.networks.map { it.cidr },
-                            apps = parseSplitAppsJson(userApps),
-                        )
-                    }
-                } catch (e: Exception) {
-                    Timber.w(e, "Split-tunnel preset fetch failed")
-                }
-            }
-            if (!adminPresetActive) {
-                val mode = settingsRepository.getSplitTunnelMode().first()
-                if (mode != "off") {
-                    val networksJson = settingsRepository.getSplitTunnelNetworks().first()
-                    val appsJson = settingsRepository.getSplitTunnelAppsV2().first()
-                    splitTunnelConfig = SplitTunnelConfig(
-                        mode = mode,
-                        networks = parseSplitNetworksJsonToCidrs(networksJson),
-                        apps = parseSplitAppsJson(appsJson),
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            Timber.w(e, "Split-tunnel config load failed")
-        }
-        return splitTunnelConfig
-    }
-
     private fun reportDeviceHostname(serverUrl: String) {
         if (serverUrl.isEmpty() || (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://"))) {
             return
@@ -523,28 +472,6 @@ class VpnViewModel @Inject constructor(
             } catch (e: Exception) {
                 Timber.d(e, "Hostname report skipped: ${e.message}")
             }
-        }
-    }
-
-    private fun parseSplitNetworksJsonToCidrs(json: String): List<String> {
-        if (json.isBlank() || json == "[]") return emptyList()
-        return try {
-            val arr = JSONArray(json)
-            (0 until arr.length()).map { arr.getJSONObject(it).getString("cidr") }
-        } catch (e: Exception) {
-            Timber.w(e, "Failed to parse split-tunnel networks JSON")
-            emptyList()
-        }
-    }
-
-    private fun parseSplitAppsJson(json: String): List<String> {
-        if (json.isBlank() || json == "[]") return emptyList()
-        return try {
-            val arr = JSONArray(json)
-            (0 until arr.length()).map { arr.getJSONObject(it).getString("package") }
-        } catch (e: Exception) {
-            Timber.w(e, "Failed to parse split-tunnel apps JSON")
-            emptyList()
         }
     }
 }
