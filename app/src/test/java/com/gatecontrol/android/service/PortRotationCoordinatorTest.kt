@@ -168,4 +168,67 @@ class PortRotationCoordinatorTest {
         assertTrue(outcome is PortRotationCoordinator.Outcome.Failed,
             "Should be Failed after exhausting maxAttempts; got $outcome")
     }
+
+    // ── excludePorts (manual-rotate bug fix) ─────────────────────────────────
+    //
+    // Regression test: when the user manually rotates ports away from the
+    // currently-active port, the coordinator MUST NOT just reconnect on the
+    // same port. Pre-fix bug: passing preferredFirstPort=null caused fallback
+    // to originalPort, which was often the same port the user was on.
+
+    @Test
+    fun `excludePorts skips the excluded port entirely`() = runTest {
+        // User is on port 51820 (original), wants to rotate AWAY from it.
+        // The coordinator should NOT try 51820, must jump to PortStrategy.
+        val outcome = coordinator.connectWithRetry(
+            rawConfig = sampleConfig,
+            splitConfig = SplitTunnelConfig(),
+            preferredFirstPort = null,
+            excludePorts = setOf(51820),
+        )
+        assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
+        val connectedPort = (outcome as PortRotationCoordinator.Outcome.Connected).port
+        assertEquals(443, connectedPort,
+            "Should skip excluded 51820 and connect on first well-known port 443")
+    }
+
+    @Test
+    fun `excludePorts skips both preferred and original if both excluded`() = runTest {
+        // User was on 8443 (persisted), wants to rotate. Original is 51820.
+        // Excluding 8443 only — coordinator still tries 51820 fallback first.
+        // To test the "both excluded" case we exclude both.
+        val outcome = coordinator.connectWithRetry(
+            rawConfig = sampleConfig,
+            splitConfig = SplitTunnelConfig(),
+            preferredFirstPort = 8443,
+            excludePorts = setOf(8443, 51820),
+        )
+        assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
+        assertEquals(443, (outcome as PortRotationCoordinator.Outcome.Connected).port,
+            "Should skip both excluded ports and jump straight to PortStrategy")
+    }
+
+    @Test
+    fun `excludePorts ignores preferred but still tries original`() = runTest {
+        // Manual rotate scenario: user was on persistedPort=8443, original
+        // is 51820. excludePorts has 8443 only. Coordinator should skip
+        // 8443 but DOES try 51820 (it might be a different physical path).
+        var attemptedPorts = mutableListOf<Int>()
+        coEvery { tunnelManager.connect(any<String>(), any<SplitTunnelConfig>()) } answers {
+            val cfg = firstArg<String>()
+            val match = Regex("""Endpoint\s*=\s*[^:]+:(\d+)""").find(cfg)
+            match?.groupValues?.get(1)?.toIntOrNull()?.let { attemptedPorts.add(it) }
+            // succeed on whichever port we land on
+        }
+        val outcome = coordinator.connectWithRetry(
+            rawConfig = sampleConfig,
+            splitConfig = SplitTunnelConfig(),
+            preferredFirstPort = 8443,
+            excludePorts = setOf(8443),
+        )
+        assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
+        assertFalse(8443 in attemptedPorts, "Excluded port 8443 must not be tried")
+        assertEquals(51820, attemptedPorts.first(),
+            "Original port should be the first thing tried after excluding 8443")
+    }
 }
