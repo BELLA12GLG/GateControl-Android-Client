@@ -146,6 +146,11 @@ class TunnelMonitor(
                     if (consecutiveHandshakeFailures >= failuresBeforeDisconnect) {
                         _disconnectEvent.emit(Unit)
 
+                        // 等待 ViewModel 完成 disconnect() 后再发重连请求。
+                        // 无间隔时 disconnect() 和 connect() 可能并发执行，
+                        // 加剧 GoBackend 的 BackendException 风险。
+                        delay(1_000L)
+
                         for (attempt in 0 until maxReconnectAttempts) {
                             val suggestedPort = portRotator?.nextPort()
                             _reconnectEvent.emit(
@@ -191,7 +196,12 @@ class TunnelMonitor(
 
     companion object {
         fun calculateBackoffMs(attempt: Int): Long {
-            val base = 2_000L
+            // 基准从 2_000 提升到 8_000：
+            // WireGuard 握手超时约 5 s，ViewModel 收到 reconnectEvent 后异步执行
+            // connect()，2 s 退避时间不足以等到握手完成，导致 statsProvider() 查到
+            // 的仍是旧握手时间戳，有效端口被误判为失败并跳过。
+            // 8 s > 5 s 握手超时 + 网络延迟，确保 recovered 判断基于真实结果。
+            val base = 8_000L
             val computed = base * Math.pow(1.5, attempt.toDouble())
             return minOf(computed.toLong(), 60_000L)
         }
