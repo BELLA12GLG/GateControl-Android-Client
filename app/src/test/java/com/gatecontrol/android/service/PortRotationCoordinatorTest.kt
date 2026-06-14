@@ -94,7 +94,9 @@ class PortRotationCoordinatorTest {
 
     @Test
     fun `connectWithRetry rotates ports when initial connect throws`() = runTest {
-        // First call throws (port 51820 fails), second call succeeds (port 443)
+        // First call throws (port 51820 fails), second call succeeds.
+        // v6.6: we no longer know WHICH port the strategy picks next
+        // (random), only that it must be a different port from 51820.
         var callCount = 0
         coEvery { tunnelManager.connect(any<String>(), any<SplitTunnelConfig>()) } answers {
             callCount++
@@ -104,19 +106,27 @@ class PortRotationCoordinatorTest {
         val outcome = coordinator.connectWithRetry(sampleConfig, SplitTunnelConfig(), maxAttempts = 4)
         assertTrue(outcome is PortRotationCoordinator.Outcome.Connected,
             "Should retry on a different port after first failure; got $outcome")
-        assertEquals(443, (outcome as PortRotationCoordinator.Outcome.Connected).port,
-            "Should connect on 443 (the first well-known port)")
+        val connectedPort = (outcome as PortRotationCoordinator.Outcome.Connected).port
+        assertFalse(connectedPort == 51820,
+            "Should connect on a DIFFERENT port, not the failing original; got $connectedPort")
+        assertTrue(connectedPort in 1024..65535,
+            "Strategy must pick from unprivileged range; got $connectedPort")
     }
 
     @Test
     fun `connectWithRetry persists successful port when not original`() = runTest {
+        // v6.6: we no longer know WHICH port the strategy picks. Verify
+        // saveSuccessfulPort is called with SOME port that isn't original.
         var callCount = 0
         coEvery { tunnelManager.connect(any<String>(), any<SplitTunnelConfig>()) } answers {
             callCount++
             if (callCount == 1) throw RuntimeException("original port blocked")
         }
         coordinator.connectWithRetry(sampleConfig, SplitTunnelConfig(), maxAttempts = 3)
-        coVerify { settingsRepository.saveSuccessfulPort(443) }
+        // Any port other than 51820 (the original) is acceptable.
+        coVerify {
+            settingsRepository.saveSuccessfulPort(match { it != 51820 && it in 1024..65535 })
+        }
     }
 
     @Test
@@ -180,6 +190,8 @@ class PortRotationCoordinatorTest {
     fun `excludePorts skips the excluded port entirely`() = runTest {
         // User is on port 51820 (original), wants to rotate AWAY from it.
         // The coordinator should NOT try 51820, must jump to PortStrategy.
+        // v6.6: we don't know WHICH port the strategy picks, only that it's
+        // not 51820 and is in the unprivileged range.
         val outcome = coordinator.connectWithRetry(
             rawConfig = sampleConfig,
             splitConfig = SplitTunnelConfig(),
@@ -188,8 +200,9 @@ class PortRotationCoordinatorTest {
         )
         assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
         val connectedPort = (outcome as PortRotationCoordinator.Outcome.Connected).port
-        assertEquals(443, connectedPort,
-            "Should skip excluded 51820 and connect on first well-known port 443")
+        assertFalse(connectedPort == 51820, "Excluded port must not be picked")
+        assertTrue(connectedPort in 1024..65535,
+            "Strategy must pick from unprivileged range; got $connectedPort")
     }
 
     @Test
@@ -204,8 +217,10 @@ class PortRotationCoordinatorTest {
             excludePorts = setOf(8443, 51820),
         )
         assertTrue(outcome is PortRotationCoordinator.Outcome.Connected)
-        assertEquals(443, (outcome as PortRotationCoordinator.Outcome.Connected).port,
-            "Should skip both excluded ports and jump straight to PortStrategy")
+        val connectedPort = (outcome as PortRotationCoordinator.Outcome.Connected).port
+        assertFalse(connectedPort in setOf(8443, 51820),
+            "Both excluded ports must be skipped; got $connectedPort")
+        assertTrue(connectedPort in 1024..65535)
     }
 
     @Test
@@ -278,6 +293,7 @@ class PortRotationCoordinatorTest {
     fun `rotating from non-original port with both excluded jumps to PortStrategy`() = runTest {
         // Mimic the v6.5 ViewModel: excludePorts = {currentPort=443, originalPort=51820}
         // Coordinator must NOT try 51820 even though it's the "fall back to original" choice.
+        // v6.6: we don't know WHICH port the strategy picks; assert it's not 443/51820.
         var attemptedPorts = mutableListOf<Int>()
         coEvery { tunnelManager.connect(any<String>(), any<SplitTunnelConfig>()) } answers {
             val cfg = firstArg<String>()
@@ -294,9 +310,7 @@ class PortRotationCoordinatorTest {
         assertFalse(443 in attemptedPorts, "Active port 443 must not be retried")
         assertFalse(51820 in attemptedPorts,
             "Original port 51820 must not be tried — this is the v6.5 regression")
-        // PortStrategy well-known shortlist is [443, 53, 4500, 80]; 443 is
-        // excluded so next is 53.
-        assertEquals(53, attemptedPorts.first(),
-            "Should jump straight to PortStrategy's next well-known port")
+        assertTrue(attemptedPorts.first() in 1024..65535,
+            "Strategy must pick from unprivileged range; got ${attemptedPorts.first()}")
     }
 }
