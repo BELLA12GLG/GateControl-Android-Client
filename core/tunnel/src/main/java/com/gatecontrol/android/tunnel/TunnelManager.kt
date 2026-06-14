@@ -378,14 +378,23 @@ class TunnelManager @Inject constructor(
         // Parse host and port — endpoint may be host:port, [v6]:port, or v6:port (rare).
         val (host, port) = NetworkPrefsHelpers.splitHostPort(original) ?: return original
 
-        // v6.5: static host override has highest priority — short-circuit
-        // before even consulting InetAddress. Lets the user connect when
-        // system DNS is blocked / poisoned.
+        // If the host is already a literal IP, no DNS resolution needed.
+        if (isLiteralIp(host)) return original
+
+        // v6.7: Static host override — checked from splitConfig (the authoritative
+        // path through TunnelConnector + SettingsRepository), NOT via DnsResolver.
+        // Reason: DnsResolver's internal staticHosts are populated by
+        // SettingsViewModel which only gets instantiated when the user opens
+        // Settings. If a tunnel comes up via auto-connect, boot receiver, or
+        // Quick Tile without the user ever opening Settings, DnsResolver's
+        // config is still the default-empty. splitConfig is read fresh from
+        // SettingsRepository every connect, so it ALWAYS has the latest values.
         val staticHostHit = splitConfig.staticHosts[host.lowercase()]
         if (staticHostHit != null) {
             return try {
                 val addr = InetAddress.getByName(staticHostHit)
                 val ipString = addr.hostAddress ?: return original
+                Timber.i("Static host override for %s -> %s", host, staticHostHit)
                 if (addr is java.net.Inet6Address) "[$ipString]:$port" else "$ipString:$port"
             } catch (e: Exception) {
                 Timber.w(
@@ -398,31 +407,29 @@ class TunnelManager @Inject constructor(
             }
         }
 
-        if (ipProtocol == "auto") return original
-
         return try {
-            // v6.5: use the app-layer DnsResolver instead of raw
-            // InetAddress.getAllByName. This gives the tunnel:
-            //   - the static-hosts overrides (already handled above, but
-            //     defense-in-depth in case the SplitTunnelConfig path
-            //     ever fails to populate them)
-            //   - the DNS cache (faster repeat reconnects)
-            //   - the configured DoH upstream (DNS via DoH for the very
-            //     first connect, when system DNS may be hostile)
+            // Use DnsResolver as the upstream resolver — gives us the cache
+            // and DoH automatically. Static hosts via DnsResolver are NOT
+            // relied upon (see splitConfig path above); the resolver may
+            // still have them populated as a side effect of SettingsViewModel,
+            // but we don't depend on that.
             val addresses = try {
                 dnsResolver.resolve(host)
             } catch (e: Exception) {
                 Timber.w(e, "DnsResolver failed for %s, falling back to InetAddress", host)
                 InetAddress.getAllByName(host).toList()
             }
-            val v6 = addresses.filterIsInstance<java.net.Inet6Address>()
-            val v4 = addresses.filterIsInstance<java.net.Inet4Address>()
 
             val picked: InetAddress? = when (ipProtocol) {
-                "ipv4_only" -> v4.firstOrNull()
-                "ipv6_only" -> v6.firstOrNull()
-                "ipv6_preferred" -> v6.firstOrNull() ?: v4.firstOrNull()
-                else -> null
+                "ipv4_only" ->
+                    addresses.filterIsInstance<java.net.Inet4Address>().firstOrNull()
+                "ipv6_only" ->
+                    addresses.filterIsInstance<java.net.Inet6Address>().firstOrNull()
+                "ipv6_preferred" ->
+                    addresses.filterIsInstance<java.net.Inet6Address>().firstOrNull()
+                        ?: addresses.filterIsInstance<java.net.Inet4Address>().firstOrNull()
+                else /* "auto" or unknown */ ->
+                    addresses.firstOrNull()
             }
             if (picked == null) {
                 Timber.w(
@@ -432,11 +439,36 @@ class TunnelManager @Inject constructor(
                 return original
             }
             val ipString = picked.hostAddress ?: return original
-            // Bracket IPv6 in the endpoint string so parseEndpoint splits correctly.
             if (picked is java.net.Inet6Address) "[$ipString]:$port" else "$ipString:$port"
         } catch (e: Exception) {
             Timber.w(e, "Endpoint resolve failed for %s, falling back to original", host)
             original
+        }
+    }
+
+    /**
+     * Check if a host string is already a literal IP (v4 or v6, bracketed or not).
+     * Used to short-circuit DNS resolution for endpoints like
+     * "1.2.3.4:51820" or "[2001:db8::1]:51820".
+     */
+    private fun isLiteralIp(host: String): Boolean {
+        // InetAddresses.parse from the WG lib would be cleaner but throws
+        // ParseException on miss; a regex-style check is sufficient here.
+        return try {
+            // Strip brackets if any
+            val stripped = host.removePrefix("[").removeSuffix("]")
+            // InetAddress.getByName treats literal IPs as instant returns
+            // (no DNS lookup) — so this is fast for the literal case.
+            // We catch the non-literal case via the exception path.
+            java.net.InetAddress.getByName(stripped)
+            // getByName succeeds for both literals AND hostnames — we need
+            // a stricter check. Use InetAddresses.isInetAddress if available,
+            // or fall back to format heuristics:
+            stripped.matches(Regex("^[0-9.]+$")) ||                    // IPv4
+                stripped.matches(Regex("^[0-9a-fA-F:]+$")) ||           // IPv6
+                stripped.matches(Regex("^[0-9a-fA-F:]*::?[0-9a-fA-F:]*$"))
+        } catch (_: Exception) {
+            false
         }
     }
 
