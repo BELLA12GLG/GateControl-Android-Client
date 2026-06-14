@@ -9,5 +9,6 @@ sealed class Screen(val route: String) {
     data object Logs : Screen("settings/logs")
     data object SplitTunnel : Screen("settings/split-tunnel")
     data object Network : Screen("settings/network")
+    data object DnsCacheDetail : Screen("settings/network/dns-cache")
     data object QrScanner : Screen("setup/qr")
 }
