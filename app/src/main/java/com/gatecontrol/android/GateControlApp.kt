@@ -69,6 +69,47 @@ class GateControlApp : Application() {
                     FileLoggingTree.setEnabled(on)
                 }
             }
+
+            // v6.7: bootstrap DnsResolver config from DataStore.
+            //
+            // Before v6.7, DnsResolver's config (static hosts / DoH URL /
+            // cache enabled / cache TTL) was ONLY set by SettingsViewModel
+            // when the user opened the Settings screen. If the user never
+            // opened Settings — common when the tunnel auto-connects via
+            // boot receiver or Quick Tile — the resolver kept its default-
+            // empty config, so static hosts didn't apply, DoH didn't run,
+            // and the cache (while functionally enabled) was invisible
+            // because no resolve calls ever happened through it.
+            //
+            // This collector runs once at App start AND on every change,
+            // making DnsResolver's config track DataStore independently of
+            // any UI lifecycle.
+            val dnsResolver = entryPoint.dnsResolver()
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                kotlinx.coroutines.flow.combine(
+                    settingsRepo.getStaticHostsJson(),
+                    settingsRepo.getDohUpstreamUrl(),
+                    settingsRepo.getDnsCacheEnabled(),
+                    settingsRepo.getDnsCacheTtlSeconds(),
+                ) { json, doh, cacheOn, ttl ->
+                    com.gatecontrol.android.network.DnsResolver.Config(
+                        staticHosts = com.gatecontrol.android.network.DnsResolver
+                            .parseStaticHostsJson(json),
+                        dohUpstreamUrl = doh,
+                        cacheEnabled = cacheOn,
+                        cacheTtlSeconds = ttl,
+                    )
+                }.collect { config ->
+                    dnsResolver.updateConfig(config)
+                    Timber.d(
+                        "DnsResolver config updated: static=%d hosts, doh=%s, cache=%s, ttl=%ds",
+                        config.staticHosts.size,
+                        if (config.dohUpstreamUrl.isBlank()) "system" else "doh",
+                        config.cacheEnabled,
+                        config.cacheTtlSeconds,
+                    )
+                }
+            }
         } catch (e: Throwable) {
             Timber.e(e, "Failed to register TunnelStateHolder singletons")
         }
@@ -99,6 +140,7 @@ class GateControlApp : Application() {
         fun tunnelManager(): TunnelManager
         fun setupRepository(): SetupRepository
         fun settingsRepository(): com.gatecontrol.android.data.SettingsRepository
+        fun dnsResolver(): com.gatecontrol.android.network.DnsResolver
     }
 
     private fun installCrashLogger(context: Context) {
