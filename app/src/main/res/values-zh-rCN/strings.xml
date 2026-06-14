@@ -314,6 +314,17 @@
     <string name="dns_cache_ttl_1h">1 小时</string>
     <string name="dns_cache_ttl_6h">6 小时</string>
     <string name="dns_cache_clear">立即清空缓存</string>
+    <!-- DNS 缓存详情(v6.6)-->
+    <string name="dns_cache_view_details">查看缓存详情</string>
+    <string name="dns_cache_details_title">DNS 缓存</string>
+    <string name="dns_cache_refresh">刷新</string>
+    <string name="dns_cache_static_header">静态 hosts(已固定)</string>
+    <string name="dns_cache_static_footer">在上一级屏幕配置。优先级最高,永不过期。要删除请返回并使用"静态 hosts"列表。</string>
+    <string name="dns_cache_static_badge">静态</string>
+    <string name="dns_cache_live_header">缓存条目</string>
+    <string name="dns_cache_live_footer">最近的 DNS 查询及剩余 TTL。点 × 删除单条。</string>
+    <string name="dns_cache_empty">缓存为空</string>
+    <string name="dns_cache_remove_entry">从缓存移除</string>
 
     <!-- 应用选择器增强 -->
     <string name="split_tunnel_pick_apps">选择应用</string>
