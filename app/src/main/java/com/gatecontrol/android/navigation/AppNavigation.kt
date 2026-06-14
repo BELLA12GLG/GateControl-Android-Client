@@ -20,6 +20,7 @@ import com.gatecontrol.android.ui.components.ios.IosTab
 import com.gatecontrol.android.ui.components.ios.IosTabBar
 import com.gatecontrol.android.ui.rdp.RdpScreen
 import com.gatecontrol.android.ui.services.ServicesScreen
+import com.gatecontrol.android.ui.settings.DnsCacheDetailScreen
 import com.gatecontrol.android.ui.settings.LogsScreen
 import com.gatecontrol.android.ui.settings.NetworkSettingsScreen
 import com.gatecontrol.android.ui.settings.SettingsScreen
@@ -164,7 +165,14 @@ fun AppNavigation(
             }
 
             composable(Screen.Network.route) {
-                NetworkSettingsScreen(onNavigateBack = { navController.popBackStack() })
+                NetworkSettingsScreen(
+                    onNavigateBack = { navController.popBackStack() },
+                    onNavigateToDnsCache = { navController.navigate(Screen.DnsCacheDetail.route) },
+                )
+            }
+
+            composable(Screen.DnsCacheDetail.route) {
+                DnsCacheDetailScreen(onNavigateBack = { navController.popBackStack() })
             }
         }
     }
