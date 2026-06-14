@@ -62,6 +62,7 @@ import com.gatecontrol.android.ui.components.ios.IosTextButton
 @Composable
 fun NetworkSettingsScreen(
     onNavigateBack: () -> Unit,
+    onNavigateToDnsCache: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -98,6 +99,7 @@ fun NetworkSettingsScreen(
             onEnabledChange = viewModel::setDnsCacheEnabled,
             onTtlChange = viewModel::setDnsCacheTtlSeconds,
             onClear = viewModel::clearDnsCache,
+            onViewDetails = onNavigateToDnsCache,
         )
     }
 }
@@ -516,6 +518,7 @@ private fun DnsCacheSection(
     onEnabledChange: (Boolean) -> Unit,
     onTtlChange: (Int) -> Unit,
     onClear: () -> Unit,
+    onViewDetails: () -> Unit,
 ) {
     // TTL preset table — the only 4 values the UI exposes. The repository
     // accepts anything in [60, 86400] for forward compat, but we pin to
@@ -557,6 +560,16 @@ private fun DnsCacheSection(
                 }
             }
         }
+    }
+
+    // v6.6: details inspector. Lives in its own section so it visually
+    // separates from the cache config above and the "clear" destructive
+    // action below.
+    IosListSection {
+        IosNavigationRow(
+            title = stringResource(R.string.dns_cache_view_details),
+            onClick = onViewDetails,
+        )
     }
 
     IosListSection {
