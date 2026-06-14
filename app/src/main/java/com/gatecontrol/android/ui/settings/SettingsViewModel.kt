@@ -388,6 +388,24 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
+     * v6.6: snapshot the current DNS cache + static-host overrides for the
+     * cache-details screen. Not a Flow — the cache changes too often (every
+     * resolve) for reactive binding to make sense; the UI refreshes on demand.
+     */
+    fun dumpDnsCache(): List<com.gatecontrol.android.network.DnsResolver.CacheSnapshot> =
+        dnsResolver.dumpCache()
+
+    /**
+     * v6.6: remove a single entry from the DNS cache. Returns whether anything
+     * was actually removed (false if the key wasn't in cache, e.g. already
+     * expired or never resolved).
+     *
+     * For static-host entries the caller should use [removeStaticHost] —
+     * static hosts are configuration, not cache, and persist across restarts.
+     */
+    fun removeDnsCacheEntry(host: String): Boolean = dnsResolver.removeFromCache(host)
+
+    /**
      * @deprecated UI no longer uses this toggle — it binds to [setSplitTunnelMode] instead.
      *   Retained only for SettingsViewModelTest backward compatibility. The connect path
      *   reads [SettingsRepository.getSplitTunnelMode], so this setter has no effect on
