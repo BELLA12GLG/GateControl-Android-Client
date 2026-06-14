@@ -314,6 +314,17 @@
     <string name="dns_cache_ttl_1h">1 hour</string>
     <string name="dns_cache_ttl_6h">6 hours</string>
     <string name="dns_cache_clear">Clear cache now</string>
+    <!-- DNS cache details (v6.6) -->
+    <string name="dns_cache_view_details">View cache details</string>
+    <string name="dns_cache_details_title">DNS Cache</string>
+    <string name="dns_cache_refresh">Refresh</string>
+    <string name="dns_cache_static_header">Static hosts (pinned)</string>
+    <string name="dns_cache_static_footer">Configured in the parent screen. Highest priority — never expire. To remove, go back and use the Static hosts list.</string>
+    <string name="dns_cache_static_badge">Static</string>
+    <string name="dns_cache_live_header">Cached entries</string>
+    <string name="dns_cache_live_footer">Recent DNS lookups, with remaining TTL. Tap × to remove a single entry.</string>
+    <string name="dns_cache_empty">Cache is empty</string>
+    <string name="dns_cache_remove_entry">Remove from cache</string>
     <!-- App picker enhancements -->
     <string name="split_tunnel_pick_apps">Choose apps</string>
     <string name="split_tunnel_selected_header">Selected (%1$d)</string>
