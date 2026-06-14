@@ -79,6 +79,62 @@ class DnsResolver @Inject constructor() {
         cache.clear()
     }
 
+    /**
+     * v6.6: snapshot of one cache entry, surfaced to the UI for the
+     * "DNS cache details" screen. [remainingSeconds] is computed at
+     * the moment of the dump; entries may expire moments after.
+     */
+    data class CacheSnapshot(
+        val host: String,
+        val ips: List<String>,
+        val remainingSeconds: Long,
+        val isStatic: Boolean,
+    )
+
+    /**
+     * Return the current cache contents PLUS static hosts as a sorted list:
+     * static entries first (with `remainingSeconds = Long.MAX_VALUE` to flag
+     * them as "never expire"), then live cache entries sorted by host name.
+     *
+     * Called by the UI; the data is a snapshot — subsequent resolves may
+     * change what's in the cache. The UI should provide a refresh affordance.
+     */
+    fun dumpCache(): List<CacheSnapshot> {
+        val now = System.currentTimeMillis()
+        val config = configRef.get()
+
+        val staticEntries = config.staticHosts.map { (host, addrs) ->
+            CacheSnapshot(
+                host = host,
+                ips = addrs.mapNotNull { it.hostAddress },
+                remainingSeconds = Long.MAX_VALUE,
+                isStatic = true,
+            )
+        }
+        val cacheEntries = cache.entries.mapNotNull { (host, entry) ->
+            val remaining = (entry.expiresAt - now) / 1000
+            if (remaining <= 0) return@mapNotNull null  // already expired
+            CacheSnapshot(
+                host = host,
+                ips = entry.addresses.mapNotNull { it.hostAddress },
+                remainingSeconds = remaining,
+                isStatic = false,
+            )
+        }
+        return (staticEntries + cacheEntries).sortedBy { it.host }
+    }
+
+    /**
+     * Remove a single host's cached entry. Static-host overrides are NOT
+     * touched — they're configuration, not cache. The UI's "delete" button
+     * for a static entry must go through the SettingsViewModel /
+     * SettingsRepository path instead.
+     *
+     * Returns true if there was an entry to remove.
+     */
+    fun removeFromCache(host: String): Boolean =
+        cache.remove(host.lowercase()) != null
+
     /** OkHttp [Dns] adapter — install this on the OkHttp client. */
     val asOkHttpDns: Dns = object : Dns {
         override fun lookup(hostname: String): List<InetAddress> = resolve(hostname)
@@ -86,13 +142,17 @@ class DnsResolver @Inject constructor() {
 
     fun resolve(hostname: String): List<InetAddress> {
         val config = configRef.get()
+        // Normalize once — used by both static hosts and cache lookup so the
+        // two paths agree on key shape, and so removeFromCache(host) matches
+        // entries stored from resolves with mixed-case hostnames.
+        val key = hostname.lowercase()
 
         // 1. Static hosts (exact match, case-insensitive)
-        config.staticHosts[hostname.lowercase()]?.let { return it }
+        config.staticHosts[key]?.let { return it }
 
         // 2. Cache lookup
         if (config.cacheEnabled) {
-            val entry = cache[hostname]
+            val entry = cache[key]
             if (entry != null && entry.expiresAt > System.currentTimeMillis()) {
                 return entry.addresses
             }
@@ -109,7 +169,7 @@ class DnsResolver @Inject constructor() {
         // local destinations (some users have 10.x in their home LAN) work
         // when the tunnel is down.
         if (config.cacheEnabled) {
-            cache[hostname] = CacheEntry(
+            cache[key] = CacheEntry(
                 addresses = resolved,
                 expiresAt = System.currentTimeMillis() + (config.cacheTtlSeconds * 1000L),
             )
