@@ -11,9 +11,7 @@ import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
-import javax.inject.Singleton
-
-/**
+import javax.inject.Singleton/**
  * App-layer DNS resolver for OkHttp.
  *
  * Resolution chain (each step short-circuits the next on success):
