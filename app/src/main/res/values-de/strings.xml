@@ -314,6 +314,17 @@
     <string name="dns_cache_ttl_1h">1 Stunde</string>
     <string name="dns_cache_ttl_6h">6 Stunden</string>
     <string name="dns_cache_clear">Cache jetzt leeren</string>
+    <!-- DNS-Cache-Details (v6.6) -->
+    <string name="dns_cache_view_details">Cache-Details anzeigen</string>
+    <string name="dns_cache_details_title">DNS-Cache</string>
+    <string name="dns_cache_refresh">Aktualisieren</string>
+    <string name="dns_cache_static_header">Statische Hosts (angepinnt)</string>
+    <string name="dns_cache_static_footer">Konfiguriert im übergeordneten Bildschirm. Höchste Priorität – laufen nicht ab. Zum Entfernen zurückgehen und die Liste „Statische Hosts" verwenden.</string>
+    <string name="dns_cache_static_badge">Statisch</string>
+    <string name="dns_cache_live_header">Gecachte Einträge</string>
+    <string name="dns_cache_live_footer">Aktuelle DNS-Abfragen mit verbleibender TTL. Auf × tippen, um einen Eintrag zu entfernen.</string>
+    <string name="dns_cache_empty">Cache ist leer</string>
+    <string name="dns_cache_remove_entry">Aus Cache entfernen</string>
     <!-- App-Auswahl-Verbesserungen -->
     <string name="split_tunnel_pick_apps">Apps auswählen</string>
     <string name="split_tunnel_selected_header">Ausgewählt (%1$d)</string>
